@@ -29,6 +29,7 @@ function initialState() {
     },
     employees,
     customPositions: [],
+    hiringQueue: [],
     tasks: [],
     inbox: [],
     chat: [],
@@ -41,6 +42,9 @@ function load() {
     const s = JSON.parse(fs.readFileSync(FILE, 'utf8'));
     // Nobody is "working" after a restart.
     for (const e of Object.values(s.employees)) e.status = 'idle';
+    s.hiringQueue ??= [];
+    // A hire interrupted by a restart goes back in the queue.
+    for (const q of s.hiringQueue) if (q.status === 'writing') q.status = 'queued';
     return s;
   } catch {
     return initialState();

@@ -23,6 +23,29 @@ const base = (effort) => ({
   output_config: { effort },
 });
 
+/** Turn an API/SDK error into a short Arabic message the owner can act on. */
+export function friendlyError(err) {
+  if (err instanceof Anthropic.AuthenticationError) return 'مفتاح ANTHROPIC_API_KEY غير صحيح. حدّثه وأعد التشغيل.';
+  if (err instanceof Anthropic.PermissionDeniedError) return 'المفتاح لا يملك صلاحية لهذا النموذج.';
+  if (err instanceof Anthropic.RateLimitError) return 'تم تجاوز حد الاستخدام مؤقتاً. انتظر قليلاً وأعد المحاولة.';
+  if (err instanceof Anthropic.BadRequestError) {
+    const m = String(err.message ?? '');
+    if (/credit balance/i.test(m)) return 'رصيد Anthropic غير كافٍ. اشحن الرصيد من console.anthropic.com.';
+    return `طلب غير صالح: ${m.slice(0, 300)}`;
+  }
+  if (err instanceof Anthropic.APIConnectionError) return 'تعذّر الاتصال بـ Claude API. أعد المحاولة.';
+  if (err instanceof Anthropic.APIError) return `خطأ من Claude API (${err.status}): ${String(err.message).slice(0, 200)}`;
+  return String(err?.message ?? err);
+}
+
+function isSystemic(err) {
+  return (
+    err instanceof Anthropic.AuthenticationError ||
+    err instanceof Anthropic.PermissionDeniedError ||
+    (err instanceof Anthropic.BadRequestError && /credit balance/i.test(String(err.message)))
+  );
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (t, n = 140) => (t.length > n ? `${t.slice(0, n).trim()}…` : t);
 
@@ -148,6 +171,93 @@ export function openPositions() {
 }
 
 const hiring = new Set();
+
+// ------------------------------------------------------------ hiring queue
+// Every hire goes through one queue so Layla writes one job description at a
+// time and the owner can always see what is queued, in progress or failed.
+const emitQueue = () => {
+  // Keep the list short: drop old finished entries.
+  const q = state.hiringQueue;
+  while (q.length > 40 && q.findIndex((x) => x.status === 'done') >= 0) q.splice(q.findIndex((x) => x.status === 'done'), 1);
+  save();
+  emit('hiring', { queue: q });
+};
+
+export function enqueueHire({ positionId, customRole }) {
+  const preset = positionId ? positionById(positionId) : null;
+  if (positionId && !preset) throw new Error(`Unknown position ${positionId}`);
+  if (preset && state.employees[preset.id]) throw new Error(`${preset.nameAr} موجود في الفريق بالفعل`);
+  const key = preset ? preset.id : `custom:${customRole.trim()}`;
+  const existing = state.hiringQueue.find((x) => x.key === key && x.status !== 'done');
+  if (existing) {
+    // Re-asking for a role that failed puts it back in the queue.
+    if (existing.status === 'failed') return retryHire(existing.id);
+    return existing;
+  }
+  const item = {
+    id: newId('h'), key, positionId: preset?.id, customRole: preset ? undefined : customRole.trim(),
+    title: preset ? `${preset.roleAr} — ${preset.nameAr}` : customRole.trim(),
+    status: 'queued', at: new Date().toISOString(),
+  };
+  state.hiringQueue.push(item);
+  emitQueue();
+  pumpHiring();
+  return item;
+}
+
+export function retryHire(id) {
+  const item = state.hiringQueue.find((x) => x.id === id);
+  if (!item || item.status !== 'failed') throw new Error('Nothing to retry');
+  item.status = 'queued';
+  item.error = undefined;
+  emitQueue();
+  pumpHiring();
+  return item;
+}
+
+let pumping = false;
+export async function pumpHiring() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    let item;
+    while ((item = state.hiringQueue.find((x) => x.status === 'queued'))) {
+      item.status = 'writing';
+      item.startedAt = new Date().toISOString();
+      emitQueue();
+      console.log(`[hire] start ${item.title}`);
+      try {
+        const e = await hire({ positionId: item.positionId, customRole: item.customRole });
+        item.status = 'done';
+        item.employeeId = e.id;
+        console.log(`[hire] done ${item.title} -> ${e.id}`);
+      } catch (err) {
+        console.error(`[hire] failed ${item.title}:`, err);
+        item.status = 'failed';
+        item.error = friendlyError(err);
+        // A bad key or an empty balance fails every hire the same way:
+        // stop the queue and say it once instead of once per role.
+        const systemic = isSystemic(err);
+        const stopped = [];
+        if (systemic) {
+          for (const x of state.hiringQueue) {
+            if (x.status === 'queued') {
+              x.status = 'failed';
+              x.error = item.error;
+              stopped.push(x);
+            }
+          }
+        }
+        const what = stopped.length ? `توقف التوظيف (${stopped.length + 1} وظائف)` : `تعذّر توظيف «${item.title}»`;
+        log('layla', `⚠️ ${what}: ${item.error}`);
+        emit('error', { message: `${what}: ${item.error}` });
+      }
+      emitQueue();
+    }
+  } finally {
+    pumping = false;
+  }
+}
 
 /** HR writes the JD, then the new employee joins the office. */
 export async function hire({ positionId, customRole }) {
