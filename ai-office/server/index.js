@@ -1,11 +1,10 @@
 import express from 'express';
-import Anthropic from '@anthropic-ai/sdk';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { state, bus, save, reset, emit } from './store.js';
 import { DEPARTMENTS } from './roster.js';
-import { LIVE, MODEL, runRequest, hire, holdMeeting, directMessage, openPositions } from './agents.js';
+import { LIVE, MODEL, runRequest, holdMeeting, directMessage, openPositions, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -49,6 +48,7 @@ const snapshot = () => ({
   departments: DEPARTMENTS,
   employees: Object.values(state.employees),
   openPositions: openPositions(),
+  hiringQueue: state.hiringQueue,
   tasks: state.tasks.slice(0, 30),
   inbox: state.inbox.slice(0, 100),
   chat: state.chat.slice(-150),
@@ -59,10 +59,7 @@ const snapshot = () => ({
 const background = (res, fn) => {
   fn().catch((err) => {
     console.error(err);
-    let message = String(err?.message ?? err);
-    if (err instanceof Anthropic.AuthenticationError) message = 'مفتاح ANTHROPIC_API_KEY غير صحيح. حدّثه في ملف .env وأعد تشغيل السيرفر.';
-    else if (err instanceof Anthropic.RateLimitError) message = 'تم تجاوز حد الاستخدام مؤقتاً. انتظر قليلاً وحاول مرة أخرى.';
-    emit('error', { message });
+    emit('error', { message: friendlyError(err) });
   });
   res.status(202).json({ ok: true });
 };
@@ -87,16 +84,27 @@ app.post('/api/request', (req, res) => {
   background(res, () => runRequest(text));
 });
 
+// Hiring is queued: the response comes back at once and the queue shows progress.
+const reply = (res, fn) => {
+  try {
+    res.json(fn());
+  } catch (err) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+};
+
 app.post('/api/hire', (req, res) => {
   const { positionId, customRole } = req.body ?? {};
-  if (!positionId && !customRole) return res.status(400).json({ error: 'positionId or customRole required' });
-  background(res, () => hire({ positionId, customRole }));
+  if (!positionId && !String(customRole ?? '').trim()) return res.status(400).json({ error: 'positionId or customRole required' });
+  reply(res, () => enqueueHire({ positionId, customRole }));
 });
 
 app.post('/api/hire-all', (_req, res) => {
-  background(res, async () => {
-    for (const p of openPositions()) await hire({ positionId: p.id });
-  });
+  reply(res, () => openPositions().map((p) => enqueueHire({ positionId: p.id })));
+});
+
+app.post('/api/hire/:id/retry', (req, res) => {
+  reply(res, () => retryHire(req.params.id));
 });
 
 app.post('/api/meeting', (req, res) => {
@@ -134,6 +142,7 @@ app.post('/api/reset', (_req, res) => {
 
 const PORT = Number(process.env.PORT || 4241);
 app.listen(PORT, HOST, () => {
+  pumpHiring();
   console.log(`\n  🏢 AI Office Studio → http://${HOST}:${PORT}${PASSWORD ? '  (password protected)' : ''}`);
   console.log(LIVE ? `  ✅ Live mode (model: ${MODEL})` : '  🧪 Demo mode — set ANTHROPIC_API_KEY for real agents');
   console.log('');

@@ -5,7 +5,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const timeOf = (iso) => new Date(iso).toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' });
 
-const S = { employees: {}, inbox: [], chat: [], tasks: [], openPositions: [], departments: {}, company: {} };
+const S = { employees: {}, inbox: [], chat: [], tasks: [], openPositions: [], hiringQueue: [], departments: {}, company: {} };
 const prefs = loadPrefs();
 let currentPanel = null;
 let panelArg = null;
@@ -37,6 +37,7 @@ function applySnapshot(s) {
   office.syncEmployees(s.employees);
   for (const e of s.employees) office.setStatus(e.id, e.status);
   updateBadge();
+  updateHiringBadge();
   rerender();
 }
 
@@ -82,6 +83,11 @@ function onEvent(ev) {
       office.syncEmployees(Object.values(S.employees), { animateNew: true });
       toast(`🎉 انضم ${ev.employee.nameAr} — ${ev.employee.roleAr}`, () => openPanel('profile', ev.employee.id));
       if (['hiring', 'team'].includes(currentPanel)) rerender();
+      break;
+    case 'hiring':
+      S.hiringQueue = ev.queue;
+      updateHiringBadge();
+      if (currentPanel === 'hiring') rerender();
       break;
     case 'meeting_start':
       office.startMeeting(ev.meeting.participants);
@@ -188,17 +194,41 @@ const RENDER = {
     ${team().filter((e) => !e.lead).map((e) => `<label class="check"><input type="checkbox" value="${e.id}" /> ${avatar(e.id)} ${esc(e.nameAr)} <small style="color:var(--muted)">${esc(e.roleAr)}</small></label>`).join('')}
     <div class="row-input"><button class="btn accent" id="m-start">ابدأ الاجتماع</button></div>`,
 
-  hiring: () => `
-    <p>ليلى (HR) تكتب الوصف الوظيفي لكل وظيفة، وبعدها الموظف ينضم للمكتب ويمشي لمكتبه.</p>
-    <div class="row-input"><button class="btn accent" id="h-all" ${S.openPositions.length ? '' : 'disabled'}>وظّف الكل واحد واحد (${S.openPositions.length})</button></div>
+  hiring: () => {
+    const q = S.hiringQueue ?? [];
+    const active = q.filter((x) => x.status === 'writing' || x.status === 'queued');
+    const failed = q.filter((x) => x.status === 'failed');
+    const pending = new Set([...active, ...failed].map((x) => x.positionId).filter(Boolean));
+    const open = S.openPositions.filter((p) => !pending.has(p.id));
+    const writing = q.find((x) => x.status === 'writing');
+    const since = (iso) => Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    return `
+    <p>ليلى (HR) تكتب الوصف الوظيفي لكل وظيفة، وحدة ورا الثانية. كل وظيفة تاخذ تقريباً من 20 إلى 60 ثانية، وبعدها الموظف يدخل المكتب ويمشي لمكتبه.</p>
+    ${active.length ? `
+      <h3>قيد التوظيف (${active.length})</h3>
+      ${active.map((x) => `
+        <div class="person">
+          <span class="status ${x.status === 'writing' ? 'working' : ''}">${x.status === 'writing' ? '✍️ ليلى تكتب الآن' : '⏳ بالانتظار'}</span>
+          <div class="info"><b>${esc(x.title)}</b>${x.status === 'writing' && x.startedAt ? `<small>من ${since(x.startedAt)} ثانية</small>` : ''}</div>
+        </div>`).join('')}` : ''}
+    ${failed.length ? `
+      <h3>تعذّر التوظيف</h3>
+      ${failed.map((x) => `
+        <div class="person">
+          <div class="info"><b>${esc(x.title)}</b><small style="color:#e5484d">${esc(x.error ?? '')}</small></div>
+          <button class="btn secondary" data-retry="${x.id}">إعادة المحاولة</button>
+        </div>`).join('')}` : ''}
+    <div class="row-input"><button class="btn accent" id="h-all" ${open.length + failed.length ? '' : 'disabled'}>وظّف الكل واحد واحد (${open.length + failed.length})</button></div>
     <h3>الوظائف المفتوحة</h3>
-    ${S.openPositions.map((p) => `
+    ${open.map((p) => `
       <div class="person">
         <div class="info"><b>${esc(p.nameAr)} — ${esc(p.roleAr)}</b> ${deptChip(p.dept)}<small>${esc(p.brief)}</small></div>
         <button class="btn" data-hire="${p.id}">توظيف</button>
-      </div>`).join('') || '<p>كل الوظائف مشغولة ✅</p>'}
+      </div>`).join('') || (active.length || failed.length ? '<p>كل الوظائف المتبقية في القوائم بالأعلى.</p>' : '<p>كل الوظائف مشغولة ✅</p>')}
     <h3>وظيفة جديدة مخصّصة</h3>
-    <div class="row-input"><input id="h-custom" placeholder="مثال: مسؤول علاقات عامة" /><button class="btn" id="h-custom-go">اطلب من ليلى</button></div>`,
+    <div class="row-input"><input id="h-custom" placeholder="مثال: مسؤول علاقات عامة" /><button class="btn" id="h-custom-go">اطلب من ليلى</button></div>
+    `;
+  },
 
   team: () => {
     const byDept = {};
@@ -292,21 +322,27 @@ const BIND = {
     };
   },
   hiring: (b) => {
+    const call = (path, body) => api(path, body).catch((e) => toast(e.message, null, true));
     b.querySelectorAll('[data-hire]').forEach((el) => (el.onclick = () => {
       el.disabled = true;
-      el.textContent = 'ليلى تكتب…';
-      api('/api/hire', { positionId: el.dataset.hire }).catch((e) => toast(e.message, null, true));
+      call('/api/hire', { positionId: el.dataset.hire });
+    }));
+    b.querySelectorAll('[data-retry]').forEach((el) => (el.onclick = () => {
+      el.disabled = true;
+      call(`/api/hire/${el.dataset.retry}/retry`, {});
     }));
     $('#h-all').onclick = () => {
       $('#h-all').disabled = true;
-      api('/api/hire-all', {}).catch((e) => toast(e.message, null, true));
+      call('/api/hire-all', {});
     };
-    $('#h-custom-go').onclick = () => {
+    const custom = () => {
       const role = $('#h-custom').value.trim();
       if (!role) return;
       $('#h-custom').value = '';
-      api('/api/hire', { customRole: role }).then(() => toast('ليلى تكتب الوصف الوظيفي…')).catch((e) => toast(e.message, null, true));
+      call('/api/hire', { customRole: role });
     };
+    $('#h-custom-go').onclick = custom;
+    $('#h-custom').onkeydown = (e) => e.key === 'Enter' && custom();
   },
   team: (b) => b.querySelectorAll('[data-profile]').forEach((el) => (el.onclick = () => openPanel('profile', el.dataset.profile))),
   profile: (b, id) => {
@@ -367,6 +403,13 @@ function updateBadge() {
   b.classList.toggle('hidden', !n);
 }
 
+function updateHiringBadge() {
+  const n = (S.hiringQueue ?? []).filter((x) => x.status === 'queued' || x.status === 'writing').length;
+  const btn = document.querySelector('[data-panel=hiring]');
+  btn.textContent = n ? `Hiring (HR) · ${n}` : 'Hiring (HR)';
+}
+setInterval(() => currentPanel === 'hiring' && (S.hiringQueue ?? []).some((x) => x.status === 'writing') && rerender(), 5000);
+
 function tick(text) {
   const t = $('#ticker');
   const d = document.createElement('div');
@@ -382,8 +425,10 @@ function toast(text, onClick, error = false) {
   d.className = `toast ${error ? 'error' : ''}`;
   d.textContent = text;
   if (onClick) d.onclick = () => (onClick(), d.remove());
-  $('#toasts').appendChild(d);
-  setTimeout(() => d.remove(), 6000);
+  const box = $('#toasts');
+  box.appendChild(d);
+  while (box.children.length > 4) box.firstChild.remove();
+  setTimeout(() => d.remove(), error ? 15000 : 6000);
 }
 
 // ---------------------------------------------- sound, alerts, read aloud
