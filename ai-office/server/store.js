@@ -7,7 +7,7 @@ import { POSITIONS } from './roster.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // DATA_DIR can point at a persistent volume (e.g. /data on Railway).
-const DATA_DIR = process.env.DATA_DIR || path.join(here, '..', 'data');
+export const DATA_DIR = process.env.DATA_DIR || path.join(here, '..', 'data');
 const FILE = path.join(DATA_DIR, 'state.json');
 
 export const bus = new EventEmitter();
@@ -30,6 +30,8 @@ function initialState() {
     employees,
     customPositions: [],
     hiringQueue: [],
+    files: [],
+    memory: [],
     tasks: [],
     inbox: [],
     chat: [],
@@ -43,6 +45,8 @@ function load() {
     // Nobody is "working" after a restart.
     for (const e of Object.values(s.employees)) e.status = 'idle';
     s.hiringQueue ??= [];
+    s.files ??= [];
+    s.memory ??= [];
     // A hire interrupted by a restart goes back in the queue.
     for (const q of s.hiringQueue) if (q.status === 'writing') q.status = 'queued';
     return s;

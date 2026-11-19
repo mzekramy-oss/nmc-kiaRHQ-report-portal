@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { state, bus, save, reset, emit } from './store.js';
 import { DEPARTMENTS } from './roster.js';
-import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
+import { addFile, removeFile, fileBlob, addMemory, removeMemory, seedBuiltins, MAX_UPLOAD } from './knowledge.js';
+import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, summarizeFile, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -54,6 +55,8 @@ const snapshot = () => ({
   inbox: state.inbox.slice(0, 100),
   chat: state.chat.slice(-150),
   meetings: state.meetings.slice(0, 20),
+  files: state.files,
+  memory: state.memory,
 });
 
 // Long-running work runs in the background; the UI follows it over SSE.
@@ -120,6 +123,41 @@ app.post('/api/dm/:id', (req, res) => {
   background(res, () => directMessage(req.params.id, text));
 });
 
+// ------------------------------------------------------- company files
+app.post('/api/files', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
+  const name = decodeURIComponent(String(req.get('x-file-name') || '')).replace(/[\\/]/g, '_').trim();
+  if (!name || !req.body?.length) return res.status(400).json({ error: 'اسم الملف أو محتواه مفقود' });
+  try {
+    const f = await addFile(req.body, name);
+    summarizeFile(f);
+    res.json(f);
+  } catch (err) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+});
+
+app.get('/api/files/:id/download', (req, res) => {
+  const b = fileBlob(req.params.id);
+  if (!b) return res.status(404).send('Not found');
+  res.download(b.path, b.file.name);
+});
+
+app.post('/api/files/:id/delete', (req, res) => {
+  reply(res, () => (removeFile(req.params.id), { ok: true }));
+});
+
+// --------------------------------------------------------- team memory
+app.post('/api/memory', (req, res) => {
+  const title = String(req.body?.title ?? '').trim();
+  const text = String(req.body?.text ?? '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  reply(res, () => addMemory({ kind: 'note', title: title || 'ملاحظة من المالك', text, by: 'owner' }));
+});
+
+app.post('/api/memory/:id/delete', (req, res) => {
+  reply(res, () => (removeMemory(req.params.id), { ok: true }));
+});
+
 app.post('/api/company', (req, res) => {
   const { name, about } = req.body ?? {};
   if (name) state.company.name = String(name);
@@ -144,6 +182,7 @@ app.post('/api/reset', (_req, res) => {
 const PORT = Number(process.env.PORT || 4241);
 app.listen(PORT, HOST, () => {
   pumpHiring();
+  seedBuiltins().catch((err) => console.error('[files] seeding failed:', err));
   console.log(`\n  🏢 AI Office Studio → http://${HOST}:${PORT}${PASSWORD ? '  (password protected)' : ''}`);
   console.log(LIVE ? `  ✅ Live mode (model: ${MODEL})` : '  🧪 Demo mode — set ANTHROPIC_API_KEY for real agents');
   console.log('');
