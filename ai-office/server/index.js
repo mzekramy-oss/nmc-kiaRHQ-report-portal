@@ -2,9 +2,9 @@ import express from 'express';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { state, bus, save, reset, emit } from './store.js';
+import { state, bus, save, reset, emit, addInbox, log } from './store.js';
 import { DEPARTMENTS } from './roster.js';
-import { addFile, removeFile, fileBlob, addMemory, removeMemory, seedBuiltins, MAX_UPLOAD } from './knowledge.js';
+import { addFile, removeFile, fileBlob, addMemory, removeMemory, seedBuiltins, setSummary, MAX_UPLOAD, CATEGORIES } from './knowledge.js';
 import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, summarizeFile, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +25,66 @@ const same = (a, b) => {
 };
 // Health check stays open so the host can tell the app is up.
 app.get('/healthz', (_req, res) => res.send('ok'));
+
+// ------------------------------------------------ report portal (public)
+// The monthly report portal is used by the marketing team, who don't get the
+// office password. It is served here so its submissions reach the office.
+// Set PORTAL_CODE to require a shared code for submissions.
+const PORTAL_CODE = process.env.PORTAL_CODE || '';
+const ROLE_NAMES = { media: 'Media & Budget', design: 'Design, BMS & Social', pr: 'PR, Events & Influencers', asd: 'ASD' };
+app.use('/portal', express.static(path.join(here, '..', 'portal')));
+app.post('/api/portal/submit', express.json({ limit: '1mb' }), async (req, res) => {
+  if (PORTAL_CODE && !same(String(req.get('x-portal-code') || ''), PORTAL_CODE)) return res.status(401).json({ error: 'portal code required' });
+  const { user, role, month, fields = [], filled = 0, total = 0, tags = {} } = req.body ?? {};
+  if (!user || !role || !month || !Array.isArray(fields)) return res.status(400).json({ error: 'user, role, month and fields required' });
+  const clean = (v) => String(v ?? '').replace(/[|\r\n]+/g, ' ').slice(0, 2000);
+  const section = ROLE_NAMES[role] ?? role;
+  const md = [
+    `# التقرير الشهري — ${clean(month)} — ${section}`,
+    '',
+    `- **عبّاه:** ${clean(user)}`,
+    `- **وقت الإرسال:** ${new Date().toISOString()}`,
+    `- **الحقول المعبّاة:** ${Number(filled) || 0} / ${Number(total) || 0}`,
+    '',
+    '| الحقل | المفتاح | القيمة |',
+    '|---|---|---|',
+    ...fields.slice(0, 300).map((f) => `| ${clean(f.label)} | ${clean(f.id)} | ${clean(f.value)} |`),
+    ...Object.entries(tags || {}).map(([k, v]) => `| ${clean(k)} | tags | ${clean(Array.isArray(v) ? v.join(', ') : v)} |`),
+  ].join('\n');
+  try {
+    const name = `portal-${clean(month).replace(/\s+/g, '-')}-${role}.md`;
+    const f = await addFile(Buffer.from(md), name, { by: clean(user), category: 'portal', key: `portal:${clean(month)}:${role}` });
+    const preview = fields.slice(0, 4).map((x) => `${clean(x.label)}: ${clean(x.value)}`).join('، ');
+    setSummary(f.id, `قسم ${section} لشهر ${clean(month)} من ${clean(user)} — ${preview}`);
+    addInbox({ from: 'portal', title: `📊 بوابة التقرير: ${section} — ${clean(user)} (${clean(month)})`, body: md });
+    log('portal', `وصل قسم ${section} لشهر ${clean(month)} من ${clean(user)} (${Number(filled) || 0}/${Number(total) || 0} حقل).`);
+    addMemory({ kind: 'note', title: `بوابة التقرير: ${section} — ${clean(month)}`, text: `أرسل ${clean(user)} أرقام قسم ${section}. ${preview}. الملف الكامل: ${f.id}.`, by: 'portal' });
+    res.json({ ok: true, fileId: f.id });
+  } catch (err) {
+    console.error('[portal] submit failed:', err);
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
+
+// --------------------------------------------- automated file ingest (token)
+// For scheduled exports (Power Automate, scripts): POST a file with
+// "Authorization: Bearer <INGEST_TOKEN>" and ?category=leads|emails|budget.
+const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
+app.post('/api/ingest/file', express.raw({ type: () => true, limit: MAX_UPLOAD }), async (req, res) => {
+  const token = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!INGEST_TOKEN || !token || !same(token, INGEST_TOKEN)) return res.status(401).json({ error: 'invalid token' });
+  const category = req.query.category ? String(req.query.category) : null;
+  if (category && (!CATEGORIES[category] || category === 'portal')) return res.status(400).json({ error: 'category must be leads, emails or budget' });
+  const name = decodeURIComponent(String(req.get('x-file-name') || req.query.name || '')).replace(/[\\/]/g, '_').trim();
+  if (!name || !req.body?.length) return res.status(400).json({ error: 'file name and body required' });
+  try {
+    const f = await addFile(req.body, name, { by: 'automation', category });
+    summarizeFile(f);
+    res.json({ ok: true, fileId: f.id });
+  } catch (err) {
+    res.status(400).json({ error: String(err?.message ?? err) });
+  }
+});
 if (PASSWORD) {
   app.use((req, res, next) => {
     const [scheme, encoded] = (req.headers.authorization || '').split(' ');
@@ -56,6 +116,9 @@ const snapshot = () => ({
   chat: state.chat.slice(-150),
   meetings: state.meetings.slice(0, 20),
   files: state.files,
+  categories: CATEGORIES,
+  ingestEnabled: Boolean(INGEST_TOKEN),
+  portalCodeSet: Boolean(PORTAL_CODE),
   memory: state.memory,
 });
 
@@ -128,7 +191,9 @@ app.post('/api/files', express.raw({ type: () => true, limit: MAX_UPLOAD }), asy
   const name = decodeURIComponent(String(req.get('x-file-name') || '')).replace(/[\\/]/g, '_').trim();
   if (!name || !req.body?.length) return res.status(400).json({ error: 'اسم الملف أو محتواه مفقود' });
   try {
-    const f = await addFile(req.body, name);
+    const category = String(req.get('x-file-category') || '') || null;
+    if (category && (!CATEGORIES[category] || category === 'portal')) return res.status(400).json({ error: 'تصنيف غير معروف' });
+    const f = await addFile(req.body, name, { category });
     summarizeFile(f);
     res.json(f);
   } catch (err) {

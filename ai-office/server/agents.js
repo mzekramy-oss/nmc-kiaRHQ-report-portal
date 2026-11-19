@@ -135,13 +135,16 @@ function gmSystem() {
 
 // ---------------------------------------------------------------- employees
 
-async function runEmployee(emp, task, { context = '', effort = 'medium' } = {}) {
+async function runEmployee(emp, task, { context = '', effort = 'medium', onRead, onPast } = {}) {
   setStatus(emp.id, 'working', short(task, 80));
   emit('say', { id: emp.id, text: 'جاري العمل…' });
   try {
     let out;
     if (!LIVE) {
       await sleep(2500 + Math.random() * 3000);
+      // In demo mode, pretend to read one current file so the Sources list can be checked.
+      const files = (state.files ?? []).filter((f) => !f.superseded);
+      if (files.length && onRead) onRead(files[Math.floor(Math.random() * files.length)]);
       out = demoAnswer(emp, task);
     } else {
       const params = {
@@ -149,7 +152,10 @@ async function runEmployee(emp, task, { context = '', effort = 'medium' } = {}) 
         system: systemFor(emp),
         messages: [{ role: 'user', content: context ? `${task}\n\n---\nContext:\n${context}` : task }],
       };
-      const tools = knowledgeTools({ onRead: (f) => emit('say', { id: emp.id, text: `أقرأ ملف: ${f.name}` }) });
+      const tools = knowledgeTools({
+        onRead: (f) => (emit('say', { id: emp.id, text: `أقرأ ملف: ${f.name}` }), onRead?.(f)),
+        onPast,
+      });
       if (emp.webSearch) tools.push({ type: 'web_search_20260209', name: 'web_search', max_uses: 6 });
       const runner = api().beta.messages.toolRunner({ ...params, tools });
       out = textOf(await runner.runUntilDone());
@@ -403,7 +409,15 @@ export async function holdMeeting({ topic, participantIds }) {
 
 export async function runRequest(request) {
   const gm = state.employees.rami;
-  const task = { id: newId('task'), request, status: 'running', steps: [], at: new Date().toISOString() };
+  const task = { id: newId('task'), request, status: 'running', steps: [], sources: [], at: new Date().toISOString() };
+  // Which files and earlier work each agent actually read, for the "Sources" list.
+  const addSource = (kind, id, name, by) => {
+    let src = task.sources.find((x) => x.kind === kind && x.id === id);
+    if (!src) task.sources.push((src = { kind, id, name, by: [] }));
+    if (!src.by.includes(by)) src.by.push(by);
+  };
+  const pastName = (ref) => state.tasks.find((t) => t.id === ref)?.request ?? state.meetings.find((m) => m.id === ref)?.topic ?? ref;
+  const memoryCount = (state.memory ?? []).length;
   state.tasks.unshift(task);
   emit('task', { task });
   log('owner', request, { task: task.id });
@@ -417,7 +431,11 @@ export async function runRequest(request) {
     task.steps.push(step);
     emit('assign', { taskId: task.id, step, from: gm.id, to: emp.id });
     log('rami', `@${emp.name} ${brief}`, { task: task.id });
-    const result = await runEmployee(emp, brief, { context });
+    const result = await runEmployee(emp, brief, {
+      context,
+      onRead: (f) => addSource('file', f.id, f.name, emp.id),
+      onPast: (ref) => addSource('past', ref, pastName(ref), emp.id),
+    });
     step.status = 'done';
     step.result = result;
     emit('task', { task });
@@ -435,7 +453,10 @@ export async function runRequest(request) {
         system: gmSystem(),
         messages: [{ role: 'user', content: request }],
         tools: [
-          ...knowledgeTools({ onRead: (f) => emit('say', { id: gm.id, text: `أقرأ ملف: ${f.name}` }) }),
+          ...knowledgeTools({
+            onRead: (f) => (emit('say', { id: gm.id, text: `أقرأ ملف: ${f.name}` }), addSource('file', f.id, f.name, gm.id)),
+            onPast: (ref) => addSource('past', ref, pastName(ref), gm.id),
+          }),
           betaTool({
             name: 'assign_task',
             description: 'Assign a task to one employee and get their finished work back. Call several in one turn for independent tasks.',
@@ -486,7 +507,7 @@ export async function runRequest(request) {
     task.final = final;
     rememberTask(task).catch((err) => console.error('[memory] task note failed:', err));
     log('rami', final, { task: task.id, final: true });
-    addInbox({ from: 'rami', title: short(request, 70), body: final, taskId: task.id });
+    addInbox({ from: 'rami', title: short(request, 70), body: `${final}\n\n---\n${sourcesText(task.sources, memoryCount)}`, taskId: task.id });
     emit('say', { id: gm.id, text: 'التسليم جاهز في صندوق الوارد 📥' });
     return task;
   } catch (err) {
@@ -502,6 +523,22 @@ export async function runRequest(request) {
 }
 
 // ------------------------------------------------------------- knowledge
+
+/** The "Sources" section shown under every deliverable. */
+function sourcesText(sources, memoryCount) {
+  const who = (ids) => ids.map((id) => state.employees[id]?.nameAr ?? id).join('، ');
+  const files = sources.filter((x) => x.kind === 'file');
+  const past = sources.filter((x) => x.kind === 'past');
+  const lines = ['### 📚 المصادر'];
+  if (files.length) lines.push(...files.map((x) => {
+    const f = state.files?.find((y) => y.id === x.id);
+    return `- 📄 ${x.name}${f ? ` (نسخة ${f.at.slice(0, 10)})` : ''} — قرأه: ${who(x.by)}`;
+  }));
+  if (past.length) lines.push(...past.map((x) => `- 📋 شغل سابق: ${x.name} — رجع له: ${who(x.by)}`));
+  if (!files.length && !past.length) lines.push('- ما انقرأ أي ملف أو شغل سابق في هذي المهمة.');
+  lines.push(`- 🧠 ذاكرة الفريق: ${memoryCount} ملاحظة كانت قدام الفريق وقت التنفيذ.`);
+  return lines.join('\n');
+}
 
 /** Rami writes a short memory note after every finished task. */
 async function rememberTask(task) {
