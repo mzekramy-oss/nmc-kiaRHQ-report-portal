@@ -1,6 +1,7 @@
 import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { state, bus, save, reset, emit } from './store.js';
 import { DEPARTMENTS } from './roster.js';
@@ -8,6 +9,35 @@ import { LIVE, MODEL, runRequest, hire, holdMeeting, directMessage, openPosition
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// Password protection. Required whenever the office is reachable from outside
+// this machine, because every request spends the owner's API credit.
+const PASSWORD = process.env.OFFICE_PASSWORD || '';
+const HOST = process.env.HOST || (process.env.RAILWAY_ENVIRONMENT || process.env.RENDER ? '0.0.0.0' : '127.0.0.1');
+if (HOST !== '127.0.0.1' && HOST !== 'localhost' && !PASSWORD) {
+  console.error('\n  ❌ OFFICE_PASSWORD is required when the office is public. Set it and restart.\n');
+  process.exit(1);
+}
+const same = (a, b) => {
+  const x = crypto.createHash('sha256').update(a).digest();
+  const y = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(x, y);
+};
+// Health check stays open so the host can tell the app is up.
+app.get('/healthz', (_req, res) => res.send('ok'));
+if (PASSWORD) {
+  app.use((req, res, next) => {
+    const [scheme, encoded] = (req.headers.authorization || '').split(' ');
+    if (scheme === 'Basic' && encoded) {
+      const decoded = Buffer.from(encoded, 'base64').toString();
+      const pass = decoded.slice(decoded.indexOf(':') + 1);
+      if (same(pass, PASSWORD)) return next();
+    }
+    res.set('WWW-Authenticate', 'Basic realm="Office Studio", charset="UTF-8"');
+    res.status(401).send('Password required');
+  });
+}
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(here, '..', 'public')));
 app.use('/vendor/three', express.static(path.join(here, '..', 'node_modules', 'three')));
@@ -103,8 +133,8 @@ app.post('/api/reset', (_req, res) => {
 });
 
 const PORT = Number(process.env.PORT || 4241);
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  🏢 AI Office Studio → http://127.0.0.1:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\n  🏢 AI Office Studio → http://${HOST}:${PORT}${PASSWORD ? '  (password protected)' : ''}`);
   console.log(LIVE ? `  ✅ Live mode (model: ${MODEL})` : '  🧪 Demo mode — set ANTHROPIC_API_KEY for real agents');
   console.log('');
 });

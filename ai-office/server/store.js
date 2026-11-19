@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { POSITIONS } from './roster.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(here, '..', 'data');
+// DATA_DIR can point at a persistent volume (e.g. /data on Railway).
+const DATA_DIR = process.env.DATA_DIR || path.join(here, '..', 'data');
 const FILE = path.join(DATA_DIR, 'state.json');
 
 export const bus = new EventEmitter();
