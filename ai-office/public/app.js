@@ -5,7 +5,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const timeOf = (iso) => new Date(iso).toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' });
 
-const S = { employees: {}, inbox: [], chat: [], tasks: [], openPositions: [], hiringQueue: [], departments: {}, company: {} };
+const S = { employees: {}, inbox: [], chat: [], tasks: [], openPositions: [], hiringQueue: [], files: [], memory: [], departments: {}, company: {} };
 const prefs = loadPrefs();
 let currentPanel = null;
 let panelArg = null;
@@ -89,6 +89,14 @@ function onEvent(ev) {
       updateHiringBadge();
       if (currentPanel === 'hiring') rerender();
       break;
+    case 'files':
+      S.files = ev.files;
+      if (currentPanel === 'files') rerender();
+      break;
+    case 'memory':
+      S.memory = ev.memory;
+      if (currentPanel === 'memory') rerender();
+      break;
     case 'meeting_start':
       office.startMeeting(ev.meeting.participants);
       toast(`📅 اجتماع: ${ev.meeting.topic}`);
@@ -109,7 +117,7 @@ function onEvent(ev) {
 }
 
 // --------------------------------------------------------------- panels
-const TITLES = { inbox: 'صندوق الوارد', chat: 'محادثة الفريق', tasks: 'المهام', meeting: 'بدء اجتماع', hiring: 'التوظيف — ليلى (HR)', team: 'الفريق', settings: 'الإعدادات', profile: 'الملف الوظيفي', item: 'التسليم' };
+const TITLES = { files: 'ملفات الشركة', memory: 'ذاكرة الفريق', inbox: 'صندوق الوارد', chat: 'محادثة الفريق', tasks: 'المهام', meeting: 'بدء اجتماع', hiring: 'التوظيف — ليلى (HR)', team: 'الفريق', settings: 'الإعدادات', profile: 'الملف الوظيفي', item: 'التسليم' };
 
 function openPanel(name, arg = null) {
   currentPanel = name;
@@ -230,6 +238,39 @@ const RENDER = {
     `;
   },
 
+  files: () => {
+    const size = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`);
+    return `
+    <p>ارفع ملفات شغلك: تقارير، ميزانيات، خطط، عروض، صور حملات. كل الموظفين يقرونها ويرجعون لها في مهامهم.</p>
+    <p><small>المدعوم: PDF، Word (.docx)، Excel (.xlsx)، CSV، TXT، صور. حتى 25MB للملف.</small></p>
+    <input type="file" id="f-input" multiple style="display:none" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.webp,.gif,.html" />
+    <div class="row-input"><button class="btn accent" id="f-pick">⬆️ رفع ملفات</button></div>
+    <div id="f-progress"></div>
+    <h3>الملفات (${S.files.length})</h3>
+    ${S.files.map((f) => `
+      <div class="person">
+        <span class="avatar" style="background:#eef0f3">${f.kind === 'image' ? '🖼' : '📄'}</span>
+        <div class="info"><b dir="auto">${esc(f.name)}</b> ${f.builtin ? '<span class="dept" style="background:#e8a48a">دليل</span>' : ''}
+          <small>${size(f.size)} · ${timeOf(f.at)}${f.summary ? ` · ${esc(f.summary)}` : ' · ⏳ يتم تلخيصه…'}</small></div>
+        <a class="btn secondary" href="/api/files/${f.id}/download">تنزيل</a>
+        ${f.builtin ? '' : `<button class="btn secondary" data-del="${f.id}">حذف</button>`}
+      </div>`).join('') || '<p>ما فيه ملفات للحين.</p>'}`;
+  },
+
+  memory: () => `
+    <p>رامي يكتب هنا ملخص كل مهمة واجتماع، والموظفين يقرونه قبل أي مهمة جديدة. تقدر تضيف معلومات ثابتة عن شغلك، مثلاً الميزانية الشهرية، الأهداف، أو قواعد العلامة التجارية.</p>
+    <input class="field" id="mem-title" placeholder="العنوان (اختياري)" />
+    <textarea class="field" id="mem-text" style="margin-top:6px" placeholder="مثال: ميزانية الميديا الشهرية 1,000,000 ريال، والهدف 15,000 ليد رقمي."></textarea>
+    <div class="row-input"><button class="btn" id="mem-add">إضافة للذاكرة</button></div>
+    <h3>الذاكرة (${S.memory.length})</h3>
+    ${S.memory.map((m) => `
+      <div class="item">
+        <div class="meta">${{ task: '📋 مهمة', meeting: '📅 اجتماع', note: '📌 ملاحظة' }[m.kind] ?? m.kind} · ${timeOf(m.at)} ${new Date(m.at).toLocaleDateString('ar-SA')}
+          <button class="btn secondary" style="margin-inline-start:auto;padding:2px 8px" data-mdel="${m.id}">حذف</button></div>
+        <div class="title">${esc(m.title)}</div>
+        <div class="md">${md(m.text)}</div>
+      </div>`).join('') || '<p>الذاكرة فاضية. بتتعبى تلقائياً بعد أول مهمة أو اجتماع.</p>'}`,
+
   team: () => {
     const byDept = {};
     for (const e of team()) (byDept[e.dept] ??= []).push(e);
@@ -345,6 +386,46 @@ const BIND = {
     };
     $('#h-custom-go').onclick = custom;
     $('#h-custom').onkeydown = (e) => e.key === 'Enter' && custom();
+  },
+  files: (b) => {
+    const input = $('#f-input');
+    $('#f-pick').onclick = () => input.click();
+    input.onchange = async () => {
+      const prog = $('#f-progress');
+      for (const file of input.files) {
+        const line = document.createElement('p');
+        line.textContent = `⏳ يرفع: ${file.name}`;
+        prog.appendChild(line);
+        try {
+          const res = await fetch('/api/files', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || res.statusText);
+          line.textContent = `✅ ${file.name}`;
+        } catch (e) {
+          line.textContent = `❌ ${file.name}: ${e.message}`;
+          line.style.color = '#e5484d';
+        }
+      }
+      input.value = '';
+    };
+    b.querySelectorAll('[data-del]').forEach((el) => (el.onclick = () => {
+      if (confirm('حذف الملف؟ الموظفين ما راح يقدرون يقرونه بعدها.')) api(`/api/files/${el.dataset.del}/delete`, {}).catch((e) => toast(e.message, null, true));
+    }));
+  },
+  memory: (b) => {
+    $('#mem-add').onclick = async () => {
+      const text = $('#mem-text').value.trim();
+      if (!text) return;
+      try {
+        await api('/api/memory', { title: $('#mem-title').value.trim(), text });
+        toast('انضافت للذاكرة');
+      } catch (e) {
+        toast(e.message, null, true);
+      }
+    };
+    b.querySelectorAll('[data-mdel]').forEach((el) => (el.onclick = () => {
+      if (confirm('حذف هذي الملاحظة من الذاكرة؟')) api(`/api/memory/${el.dataset.mdel}/delete`, {}).catch((e) => toast(e.message, null, true));
+    }));
   },
   team: (b) => b.querySelectorAll('[data-profile]').forEach((el) => (el.onclick = () => openPanel('profile', el.dataset.profile))),
   profile: (b, id) => {

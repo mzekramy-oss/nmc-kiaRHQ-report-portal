@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import { POSITIONS, DEPARTMENTS, positionById } from './roster.js';
 import { state, save, emit, setStatus, log, addInbox, newId } from './store.js';
+import { knowledgeBlock, knowledgeTools, addMemory, fileText, imageBlock, setSummary } from './knowledge.js';
 
 export const MODEL = process.env.OFFICE_MODEL || 'claude-opus-5-5';
 export const LIVE = Boolean(
@@ -104,6 +105,9 @@ function systemFor(emp) {
     'If something essential is unknown, state your assumption in one line and continue.',
     'Reply in the language the task is written in; default to Arabic (Saudi-friendly, professional).',
     'Use clear Markdown headings and tables where they help. Keep it focused.',
+    'Check the company files and team memory below for anything relevant before you start; cite the file or earlier work you used.',
+    '',
+    knowledgeBlock(),
   ].join('\n');
 }
 
@@ -123,6 +127,9 @@ function gmSystem() {
     '5. Review what comes back. If something is weak, send it back with specific notes.',
     '6. Finish with one consolidated deliverable for the owner: a short executive summary, then the combined work, then next steps with owners.',
     'Do simple questions yourself without delegating. Reply in the owner\'s language (default Arabic).',
+    'Before planning, check the company files and team memory below. Point employees to the file ids and earlier work they should use.',
+    '',
+    knowledgeBlock(),
   ].join('\n');
 }
 
@@ -142,15 +149,10 @@ async function runEmployee(emp, task, { context = '', effort = 'medium' } = {}) 
         system: systemFor(emp),
         messages: [{ role: 'user', content: context ? `${task}\n\n---\nContext:\n${context}` : task }],
       };
-      if (emp.webSearch) {
-        const runner = api().beta.messages.toolRunner({
-          ...params,
-          tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 6 }],
-        });
-        out = textOf(await runner.runUntilDone());
-      } else {
-        out = textOf(await api().beta.messages.create(params));
-      }
+      const tools = knowledgeTools({ onRead: (f) => emit('say', { id: emp.id, text: `أقرأ ملف: ${f.name}` }) });
+      if (emp.webSearch) tools.push({ type: 'web_search_20260209', name: 'web_search', max_uses: 6 });
+      const runner = api().beta.messages.toolRunner({ ...params, tools });
+      out = textOf(await runner.runUntilDone());
     }
     emit('say', { id: emp.id, text: 'خلصت ✅' });
     return out;
@@ -386,6 +388,7 @@ export async function holdMeeting({ topic, participantIds }) {
       decision = textOf(msg);
     }
     meeting.decision = decision;
+    addMemory({ kind: 'meeting', title: `اجتماع: ${topic}`, text: short(decision.replace(/\s+/g, ' '), 600), ref: meeting.id });
     log('rami', decision, { meeting: meeting.id });
     addInbox({ from: 'rami', title: `محضر اجتماع: ${topic}`, body: `${meeting.transcript.map((t) => `### ${state.employees[t.id].nameAr}\n${t.text}`).join('\n\n')}\n\n---\n${decision}` });
     return decision;
@@ -432,6 +435,7 @@ export async function runRequest(request) {
         system: gmSystem(),
         messages: [{ role: 'user', content: request }],
         tools: [
+          ...knowledgeTools({ onRead: (f) => emit('say', { id: gm.id, text: `أقرأ ملف: ${f.name}` }) }),
           betaTool({
             name: 'assign_task',
             description: 'Assign a task to one employee and get their finished work back. Call several in one turn for independent tasks.',
@@ -480,6 +484,7 @@ export async function runRequest(request) {
     }
     task.status = 'done';
     task.final = final;
+    rememberTask(task).catch((err) => console.error('[memory] task note failed:', err));
     log('rami', final, { task: task.id, final: true });
     addInbox({ from: 'rami', title: short(request, 70), body: final, taskId: task.id });
     emit('say', { id: gm.id, text: 'التسليم جاهز في صندوق الوارد 📥' });
@@ -493,6 +498,45 @@ export async function runRequest(request) {
     setStatus(gm.id, 'idle');
     emit('task', { task });
     save();
+  }
+}
+
+// ------------------------------------------------------------- knowledge
+
+/** Rami writes a short memory note after every finished task. */
+async function rememberTask(task) {
+  let text;
+  if (!LIVE) {
+    text = short(task.final.replace(/\s+/g, ' '), 400);
+  } else {
+    const msg = await api().beta.messages.create({
+      ...base('low'),
+      max_tokens: 4000,
+      system: 'You keep the team memory for a company. Write one compact note in Arabic (max 120 words): what was asked, what was delivered or decided, key numbers, and open next steps with owners. No headings.',
+      messages: [{ role: 'user', content: `Request: ${task.request}\n\nFinal deliverable:\n${task.final.slice(0, 40000)}` }],
+    });
+    text = textOf(msg);
+  }
+  addMemory({ kind: 'task', title: short(task.request, 80), text, ref: task.id });
+}
+
+/** A one-line summary for a newly uploaded file, so agents know what's in it. */
+export async function summarizeFile(f) {
+  try {
+    let summary;
+    if (!LIVE) {
+      summary = f.kind === 'image' ? `صورة: ${f.name}` : short(fileText(f).replace(/\s+/g, ' '), 160);
+    } else {
+      const content = f.kind === 'image'
+        ? [imageBlock(f), { type: 'text', text: `File name: ${f.name}. Describe what this image is in one Arabic sentence.` }]
+        : `File name: ${f.name}\n\n${fileText(f).slice(0, 30000)}\n\nSummarize what this file contains in one or two Arabic sentences (what it is, period covered, key figures). Plain text.`;
+      const msg = await api().beta.messages.create({ ...base('low'), max_tokens: 3000, messages: [{ role: 'user', content }] });
+      summary = textOf(msg);
+    }
+    setSummary(f.id, short(summary, 300));
+  } catch (err) {
+    console.error('[files] summary failed:', err);
+    setSummary(f.id, f.name);
   }
 }
 
@@ -514,7 +558,8 @@ export async function directMessage(id, text) {
     const messages = [...history.slice(-20), { role: 'user', content: text }];
     setStatus(id, 'working', 'Replying');
     try {
-      reply = textOf(await api().beta.messages.create({ ...base('low'), system: systemFor(emp), messages }));
+      const runner = api().beta.messages.toolRunner({ ...base('low'), system: emp.lead ? gmSystem() : systemFor(emp), messages, tools: knowledgeTools() });
+      reply = textOf(await runner.runUntilDone());
     } finally {
       setStatus(id, 'idle');
     }
