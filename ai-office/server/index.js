@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { state, bus, save, reset, emit } from './store.js';
 import { DEPARTMENTS } from './roster.js';
-import { LIVE, MODEL, runRequest, holdMeeting, directMessage, openPositions, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
+import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -43,6 +43,7 @@ app.use('/vendor/three', express.static(path.join(here, '..', 'node_modules', 't
 
 const snapshot = () => ({
   live: LIVE,
+  keyInfo,
   model: MODEL,
   company: state.company,
   departments: DEPARTMENTS,

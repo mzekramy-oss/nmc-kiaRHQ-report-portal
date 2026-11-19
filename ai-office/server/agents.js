@@ -10,8 +10,27 @@ export const LIVE = Boolean(
   process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.OFFICE_LIVE === '1',
 );
 
+// Keys pasted into a dashboard often pick up invisible characters (spaces,
+// quotes, Arabic direction marks). A real key is plain ASCII with no spaces,
+// so keep only that.
+const RAW_KEY = process.env.ANTHROPIC_API_KEY ?? '';
+const API_KEY = RAW_KEY.replace(/[^\x21-\x7E]/g, '').replace(/^['"]+|['"]+$/g, '');
+
+/** Safe-to-show summary of the configured key (never the key itself). */
+export const keyInfo = {
+  set: Boolean(API_KEY),
+  prefix: API_KEY.slice(0, 10),
+  suffix: API_KEY.slice(-4),
+  length: API_KEY.length,
+  cleaned: RAW_KEY.length !== API_KEY.length,
+  looksValid: /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(API_KEY),
+};
+if (API_KEY) {
+  console.log(`  🔑 API key: ${keyInfo.prefix}…${keyInfo.suffix} (${keyInfo.length} chars)${keyInfo.cleaned ? ' — removed hidden characters' : ''}${keyInfo.looksValid ? '' : ' — does not look like an Anthropic key'}`);
+}
+
 let client = null;
-const api = () => (client ??= new Anthropic());
+const api = () => (client ??= API_KEY ? new Anthropic({ apiKey: API_KEY }) : new Anthropic());
 
 // Shared request settings. `fallbacks: "default"` lets the API re-run a
 // request on a fallback model if the primary model declines it.

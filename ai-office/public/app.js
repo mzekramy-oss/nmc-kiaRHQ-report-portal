@@ -265,6 +265,8 @@ const RENDER = {
     <div class="row-input"><button class="btn" id="c-save">حفظ</button></div>
     <h3>المكتب</h3>
     <p><small>الوضع الحالي: ${S.live ? `متصل بـ Claude API (${esc(S.model)})` : 'وضع التجربة — شغّل السيرفر مع <code>ANTHROPIC_API_KEY</code>.'}</small></p>
+    ${S.keyInfo?.set ? `<p><small>المفتاح اللي وصل للسيرفر: <code dir="ltr">${esc(S.keyInfo.prefix)}…${esc(S.keyInfo.suffix)}</code> (${S.keyInfo.length} حرف)${S.keyInfo.cleaned ? ' — تم حذف حروف مخفية منه' : ''}${S.keyInfo.looksValid ? '' : ' — <b style="color:#e5484d">شكله مو مفتاح Anthropic صحيح</b>'}</small></p>
+    <p><small>قارن آخر 4 حروف مع المفتاح في console.anthropic.com. إذا مختلفة، Railway للحين يستخدم المفتاح القديم.</small></p>` : ''}
     <div class="row-input"><button class="btn danger" id="c-reset">إعادة ضبط المكتب</button></div>`,
 };
 
