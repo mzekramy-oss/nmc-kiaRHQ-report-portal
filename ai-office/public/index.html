@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Office Studio</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script type="importmap">
+    { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <header class="toolbar" dir="ltr">
+    <div class="row">
+      <span class="brand">🏢 Office Studio</span>
+      <span id="mode" class="mode">…</span>
+      <button class="pill" data-view="top">Top view</button>
+      <button class="pill" data-view="work">Work floor</button>
+      <button class="pill" data-view="lounge">Lounge</button>
+      <button class="pill" data-view="meeting">Meeting room</button>
+      <button class="pill" data-view="cafeteria">Cafeteria</button>
+      <button class="pill" data-view="playground">Playground</button>
+      <button class="pill" data-view="overview">Overview</button>
+    </div>
+    <div class="row">
+      <button class="pill light" data-panel="inbox">Inbox <span id="inbox-badge" class="badge hidden">0</span></button>
+      <button class="pill light" data-panel="chat">Team chat</button>
+      <button class="pill light" data-panel="tasks">Tasks</button>
+      <button class="pill accent" data-panel="meeting">Start a meeting</button>
+      <button class="pill accent" data-panel="hiring">Hiring (HR)</button>
+      <button class="pill accent" data-panel="team">Team</button>
+      <button class="pill light" data-panel="settings">Settings</button>
+      <button class="pill toggle" id="t-sound">Sound off</button>
+      <button class="pill toggle" id="t-alerts">Alerts on</button>
+      <button class="pill toggle" id="t-read">Read aloud off</button>
+    </div>
+  </header>
+
+  <aside id="panel" class="panel hidden">
+    <div class="panel-head">
+      <h2 id="panel-title"></h2>
+      <button id="panel-close" class="icon" aria-label="Close">✕</button>
+    </div>
+    <div id="panel-body" class="panel-body"></div>
+  </aside>
+
+  <form id="command" class="command">
+    <div class="who">
+      <span class="avatar" style="background:#e8a48a">R</span>
+      <div><b>رامي</b><small>المدير العام — يستلم طلبك ويوزّعه على الفريق</small></div>
+    </div>
+    <textarea id="command-text" rows="1" placeholder="اكتب طلبك لرامي… مثال: جهّز لي حملة إطلاق لسيارة كيا الجديدة لشهر ديسمبر"></textarea>
+    <button type="submit" class="send">إرسال</button>
+  </form>
+
+  <div id="ticker" class="ticker"></div>
+  <div id="toasts" class="toasts"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
