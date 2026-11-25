@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import { POSITIONS, DEPARTMENTS, positionById } from './roster.js';
 import { state, save, emit, setStatus, log, addInbox, newId } from './store.js';
-import { knowledgeBlock, knowledgeTools, addMemory, fileText, imageBlock, setSummary } from './knowledge.js';
+import { knowledgeBlock, knowledgeTools, addMemory, fileText, imageBlock, setSummary, dashboardVersions, CATEGORIES } from './knowledge.js';
 
 export const MODEL = process.env.OFFICE_MODEL || 'claude-opus-5-5';
 export const LIVE = Boolean(
@@ -575,6 +575,118 @@ export async function summarizeFile(f) {
     console.error('[files] summary failed:', err);
     setSummary(f.id, f.name);
   }
+}
+
+// -------------------------------------------------------- daily briefing
+
+export const BRIEFING_TZ = process.env.BRIEFING_TZ || 'Asia/Riyadh';
+export const BRIEFING_HOUR = Math.min(23, Math.max(0, Number(process.env.BRIEFING_HOUR ?? 8)));
+const DASHBOARDS = Object.keys(CATEGORIES).filter((c) => c !== 'portal');
+let briefingRunning = false;
+
+function localNow() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', { timeZone: BRIEFING_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date())
+      .map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+/**
+ * Nasser reads the latest version of every dashboard, compares it with the
+ * previous version, and sends the owner a daily briefing.
+ */
+export async function runBriefing({ trigger = 'manual' } = {}) {
+  const analyst = state.employees.nasser;
+  if (!analyst) throw new Error('وظّف ناصر (محلل البيانات والداشبوردات) أولاً من Hiring (HR).');
+  if (briefingRunning) throw new Error('ناصر يجهّز التقرير الحين.');
+  const slots = DASHBOARDS.map((c) => ({ c, ...dashboardVersions(c) }));
+  if (!slots.some((x) => x.latest)) throw new Error('ما فيه أي داشبورد مرفوع للحين. ارفعها من Files.');
+  briefingRunning = true;
+  const today = localNow().date;
+  setStatus(analyst.id, 'working', 'Daily dashboards briefing');
+  emit('say', { id: analyst.id, text: 'أراجع الداشبوردات…' });
+  try {
+    const ageDays = (f) => Math.floor((Date.now() - new Date(f.at).getTime()) / 86400000);
+    // Dashboards can be data files or screenshots; screenshots go in as images.
+    const blocks = [];
+    const addText = (t) => blocks.push({ type: 'text', text: t });
+    const addVersion = (title, f, max) => {
+      if (f.kind === 'image') {
+        addText(`${title} (screenshot below)`);
+        blocks.push(imageBlock(f));
+      } else addText(`${title}\n${fileText(f).slice(0, max)}`);
+    };
+    for (const { c, latest, previous } of slots) {
+      const label = CATEGORIES[c].label;
+      if (!latest) {
+        addText(`## ${label}\nNot uploaded yet.`);
+        continue;
+      }
+      addVersion(`## ${label}\nLatest: ${latest.name}, uploaded ${latest.at} (${ageDays(latest)} days ago)`, latest, 60000);
+      if (previous) addVersion(`### ${label} — previous version: ${previous.name}, uploaded ${previous.at}`, previous, 25000);
+      else addText(`(${label}: no previous version to compare with.)`);
+    }
+    let text;
+    if (!LIVE) {
+      await sleep(2500);
+      text = `## التقرير اليومي — ${today}\n\n${slots.map(({ c, latest, previous }) => `- **${CATEGORIES[c].labelAr}:** ${latest ? `${latest.name} (${ageDays(latest)} يوم)${previous ? ' — مقارنة مع النسخة السابقة' : ''}` : 'ما انرفع'}`).join('\n')}\n\n_(وضع التجربة)_`;
+    } else {
+      const lastNote = (state.memory ?? []).find((m) => m.kind === 'briefing');
+      const msg = await api().beta.messages.create({
+        ...base('medium'),
+        system: systemFor(analyst),
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Write today's dashboards briefing for the owner (${today}).
+
+For each dashboard: the headline numbers, what changed versus the previous version (with numbers and %), anything unusual (spikes, drops, budget over/under pace, missing data), and one action if needed. Then a short "today's priorities" list across all dashboards.
+Flag clearly any dashboard whose latest upload is more than 2 days old, and any dashboard that is missing.
+Only use numbers that appear in the data; if something cannot be computed, say so. Reply in Arabic, concise, with Markdown headings and small tables.${lastNote ? `\n\nYesterday's briefing note, for continuity:\n${lastNote.text}` : ''}
+
+The dashboards follow.`,
+            },
+            ...blocks,
+          ],
+        }],
+      });
+      text = textOf(msg);
+    }
+    const date = new Date().toLocaleDateString('ar-SA', { timeZone: BRIEFING_TZ });
+    addInbox({ from: analyst.id, title: `📊 التقرير اليومي للداشبوردات — ${date}`, body: text });
+    log(analyst.id, `خلصت التقرير اليومي للداشبوردات (${trigger === 'schedule' ? 'تلقائي' : 'بطلب'}). موجود في صندوق الوارد.`);
+    addMemory({ kind: 'briefing', title: `التقرير اليومي — ${today}`, text: short(text.replace(/\s+/g, ' '), 700), by: analyst.id });
+    state.lastBriefing = { date: today, at: new Date().toISOString(), trigger };
+    save();
+    emit('briefing', { lastBriefing: state.lastBriefing });
+    emit('say', { id: analyst.id, text: 'التقرير اليومي في صندوق الوارد 📥' });
+    return text;
+  } finally {
+    briefingRunning = false;
+    setStatus(analyst.id, 'idle');
+  }
+}
+
+/** Run the briefing once a day after BRIEFING_HOUR (local time). */
+export function startBriefingSchedule() {
+  const tick = () => {
+    const { date, hour } = localNow();
+    if (hour < BRIEFING_HOUR || state.lastBriefing?.date === date || !state.employees.nasser || briefingRunning) return;
+    if (!DASHBOARDS.some((c) => dashboardVersions(c).latest)) return;
+    runBriefing({ trigger: 'schedule' }).catch((err) => {
+      console.error('[briefing] failed:', err);
+      emit('error', { message: `تعذّر التقرير اليومي: ${friendlyError(err)}` });
+      // Don't retry every 5 minutes after a failure; try again tomorrow.
+      state.lastBriefing = { date, at: new Date().toISOString(), trigger: 'schedule', failed: true };
+      save();
+    });
+  };
+  setTimeout(tick, 15000);
+  setInterval(tick, 5 * 60 * 1000);
 }
 
 // -------------------------------------------------------- direct messages

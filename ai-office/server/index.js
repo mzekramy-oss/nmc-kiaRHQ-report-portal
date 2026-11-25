@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { state, bus, save, reset, emit, addInbox, log } from './store.js';
 import { DEPARTMENTS } from './roster.js';
 import { addFile, removeFile, fileBlob, addMemory, removeMemory, seedBuiltins, setSummary, MAX_UPLOAD, CATEGORIES } from './knowledge.js';
-import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, summarizeFile, enqueueHire, retryHire, pumpHiring, friendlyError } from './agents.js';
+import { LIVE, MODEL, keyInfo, runRequest, holdMeeting, directMessage, openPositions, summarizeFile, enqueueHire, retryHire, pumpHiring, friendlyError, runBriefing, startBriefingSchedule, BRIEFING_HOUR, BRIEFING_TZ } from './agents.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -119,6 +119,7 @@ const snapshot = () => ({
   categories: CATEGORIES,
   ingestEnabled: Boolean(INGEST_TOKEN),
   portalCodeSet: Boolean(PORTAL_CODE),
+  briefing: { hour: BRIEFING_HOUR, tz: BRIEFING_TZ, last: state.lastBriefing ?? null },
   memory: state.memory,
 });
 
@@ -223,6 +224,11 @@ app.post('/api/memory/:id/delete', (req, res) => {
   reply(res, () => (removeMemory(req.params.id), { ok: true }));
 });
 
+app.post('/api/briefing/run', (_req, res) => {
+  if (!state.employees.nasser) return res.status(400).json({ error: 'وظّف ناصر (محلل البيانات والداشبوردات) أولاً من Hiring (HR).' });
+  background(res, () => runBriefing({ trigger: 'manual' }));
+});
+
 app.post('/api/company', (req, res) => {
   const { name, about } = req.body ?? {};
   if (name) state.company.name = String(name);
@@ -247,6 +253,7 @@ app.post('/api/reset', (_req, res) => {
 const PORT = Number(process.env.PORT || 4241);
 app.listen(PORT, HOST, () => {
   pumpHiring();
+  startBriefingSchedule();
   seedBuiltins().catch((err) => console.error('[files] seeding failed:', err));
   console.log(`\n  🏢 AI Office Studio → http://${HOST}:${PORT}${PASSWORD ? '  (password protected)' : ''}`);
   console.log(LIVE ? `  ✅ Live mode (model: ${MODEL})` : '  🧪 Demo mode — set ANTHROPIC_API_KEY for real agents');

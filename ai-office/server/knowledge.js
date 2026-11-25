@@ -18,6 +18,7 @@ export const CATEGORIES = {
   leads: { label: 'Leads dashboard', labelAr: 'داشبورد الليدز' },
   emails: { label: 'Emails dashboard', labelAr: 'داشبورد الإيميلات' },
   budget: { label: 'Budget dashboard', labelAr: 'داشبورد الميزانية' },
+  cameras: { label: 'Cameras dashboard', labelAr: 'داشبورد الكاميرات' },
   portal: { label: 'Monthly report portal', labelAr: 'بوابة التقرير الشهري' },
 };
 const MAX_TOOL_TEXT = 60000;
@@ -38,11 +39,17 @@ async function extractText(buf, name) {
   const e = ext(name);
   if (TEXT_EXT.has(e)) return buf.toString('utf8');
   if (e === '.html' || e === '.htm') {
-    return buf
-      .toString('utf8')
+    // Dashboards saved as HTML usually keep their numbers inside <script>
+    // (arrays/JSON for the charts), so keep inline script text as data.
+    const html = buf.toString('utf8');
+    const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1].trim()).filter(Boolean);
+    const visible = html
       .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ')
       .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ');
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return scripts.length ? `${visible}\n\n--- Embedded page data (scripts) ---\n${scripts.join('\n\n').slice(0, 200000)}` : visible;
   }
   if (e === '.pdf') {
     const { extractText: pdfText, getDocumentProxy } = await import('unpdf');
@@ -139,6 +146,14 @@ export function fileText(f) {
   } catch {
     return '';
   }
+}
+
+/** Latest and previous version of a dashboard slot (previous may be null). */
+export function dashboardVersions(category) {
+  const all = (state.files ?? []).filter((f) => f.category === category);
+  const latest = all.find((f) => !f.superseded) ?? null;
+  const previous = latest ? all.find((f) => f.superseded && f.at < latest.at) ?? null : null;
+  return { latest, previous };
 }
 
 export function imageBlock(f) {

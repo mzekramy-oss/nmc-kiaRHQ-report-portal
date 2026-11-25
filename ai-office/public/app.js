@@ -93,6 +93,10 @@ function onEvent(ev) {
       S.files = ev.files;
       if (currentPanel === 'files') rerender();
       break;
+    case 'briefing':
+      S.briefing = { ...(S.briefing ?? {}), last: ev.lastBriefing };
+      if (currentPanel === 'files') rerender();
+      break;
     case 'memory':
       S.memory = ev.memory;
       if (currentPanel === 'memory') rerender();
@@ -262,6 +266,7 @@ const RENDER = {
         <div class="meta"><b style="color:var(--ink)">📈 ${esc(cats[c].labelAr)}</b>
           <button class="btn accent" style="margin-inline-start:auto;padding:4px 10px" data-up="${c}">${f ? '⬆️ رفع نسخة جديدة' : '⬆️ رفع'}</button></div>
         ${f ? `<div class="title" dir="auto">${esc(f.name)}</div>
+          ${Date.now() - new Date(f.at).getTime() > 2 * 86400000 ? '<span class="status working">⚠️ قديم: مر عليه أكثر من يومين</span><br>' : ''}
           <small style="color:var(--muted)">آخر تحديث: ${date(f.at)} ${timeOf(f.at)} · ${versions} ${versions === 1 ? 'نسخة' : 'نسخ'}${f.summary ? ` · ${esc(f.summary)}` : ' · ⏳ يتم تلخيصه…'}</small>
           <div class="row-input"><a class="btn secondary" href="/api/files/${f.id}/download">تنزيل</a></div>`
         : '<small style="color:var(--muted)">ما انرفع للحين. صدّر الداشبورد كـ Excel أو CSV وارفعه هنا.</small>'}
@@ -273,7 +278,14 @@ const RENDER = {
     <input type="file" id="f-input" multiple style="display:none" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.webp,.gif,.html" />
     <h3>الداشبوردات</h3>
     <p><small>كل داشبورد له خانة ثابتة. ارفع النسخة الجديدة كل ما تتحدث، والفريق يشتغل دائماً على آخر نسخة. النسخ القديمة تبقى محفوظة تحت.</small></p>
-    ${['leads', 'emails', 'budget'].filter((c) => cats[c]).map(dashCard).join('')}
+    ${['leads', 'emails', 'budget', 'cameras'].filter((c) => cats[c]).map(dashCard).join('')}
+    <div class="item" style="cursor:default">
+      <div class="meta"><b style="color:var(--ink)">🧑‍💻 ناصر — محلل البيانات والداشبوردات</b>
+        <button class="btn" style="margin-inline-start:auto;padding:4px 10px" id="brief-now" ${S.employees.nasser ? '' : 'disabled'}>📊 اطلب التقرير الحين</button></div>
+      <small style="color:var(--muted)">${S.employees.nasser
+        ? `يقرأ كل الداشبوردات يومياً الساعة ${S.briefing?.hour ?? 8}:00 (${esc(S.briefing?.tz ?? '')}) ويقارنها بالنسخة السابقة، ويرسل لك التقرير في Inbox.${S.briefing?.last ? ` آخر تقرير: ${date(S.briefing.last.at)} ${timeOf(S.briefing.last.at)}${S.briefing.last.failed ? ' (فشل)' : ''}.` : ''}`
+        : 'ناصر للحين مو موظف. وظّفه من Hiring (HR) عشان يتابع الداشبوردات يومياً.'}</small>
+    </div>
     <h3>بوابة التقرير الشهري (${portal.length})</h3>
     <p><small>رابط البوابة للفريق: <a href="/portal/" target="_blank" dir="ltr">${location.origin}/portal/</a>. أي قسم ينرسل منها يوصل هنا تلقائياً.</small></p>
     ${portal.map(row).join('') || '<p><small>ما وصل أي قسم من البوابة للحين.</small></p>'}
@@ -293,7 +305,7 @@ const RENDER = {
     <h3>الذاكرة (${S.memory.length})</h3>
     ${S.memory.map((m) => `
       <div class="item">
-        <div class="meta">${{ task: '📋 مهمة', meeting: '📅 اجتماع', note: '📌 ملاحظة' }[m.kind] ?? m.kind} · ${timeOf(m.at)} ${new Date(m.at).toLocaleDateString('ar-SA')}
+        <div class="meta">${{ task: '📋 مهمة', meeting: '📅 اجتماع', note: '📌 ملاحظة', briefing: '📊 تقرير يومي' }[m.kind] ?? m.kind} · ${timeOf(m.at)} ${new Date(m.at).toLocaleDateString('ar-SA')}
           <button class="btn secondary" style="margin-inline-start:auto;padding:2px 8px" data-mdel="${m.id}">حذف</button></div>
         <div class="title">${esc(m.title)}</div>
         <div class="md">${md(m.text)}</div>
@@ -420,6 +432,11 @@ const BIND = {
     $('#h-custom').onkeydown = (e) => e.key === 'Enter' && custom();
   },
   files: (b) => {
+    const brief = $('#brief-now');
+    if (brief) brief.onclick = () => {
+      brief.disabled = true;
+      api('/api/briefing/run', {}).then(() => toast('ناصر بدأ يراجع الداشبوردات…')).catch((e) => toast(e.message, null, true));
+    };
     const input = $('#f-input');
     let category = '';
     b.querySelectorAll('[data-up]').forEach((el) => (el.onclick = () => {
