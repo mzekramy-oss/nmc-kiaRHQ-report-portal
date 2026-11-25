@@ -30,6 +30,12 @@ export const POSITIONS = [
     brief: 'Tracks everything new in AI: models, tools, automations and workflows. Recommends the most useful tools for each team and explains how to adopt them.',
   },
   {
+    id: 'nasser', name: 'Nasser', nameAr: 'ناصر', role: 'Data & Dashboards Analyst', roleAr: 'محلل البيانات والداشبوردات',
+    dept: 'technology', dashboards: true,
+    look: { skin: '#a5734f', hair: '#141414', suit: '#22303f', gender: 'm' },
+    brief: 'Owns every dashboard: leads, emails, budget and cameras. Reads the latest version of each one every day, compares it with the previous version, flags changes, anomalies and stale data, and answers any question about the numbers.',
+  },
+  {
     id: 'tariq', name: 'Tariq', nameAr: 'طارق', role: 'IT Specialist', roleAr: 'أخصائي تقنية المعلومات',
     dept: 'technology',
     look: { skin: '#9c6a48', hair: '#222', suit: '#2d3b2d', gender: 'm' },

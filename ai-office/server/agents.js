@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import { POSITIONS, DEPARTMENTS, positionById } from './roster.js';
 import { state, save, emit, setStatus, log, addInbox, newId } from './store.js';
-import { knowledgeBlock, knowledgeTools, addMemory, fileText, imageBlock, setSummary } from './knowledge.js';
+import { knowledgeBlock, knowledgeTools, addMemory, fileText, imageBlock, setSummary, dashboardVersions, CATEGORIES } from './knowledge.js';
 
 export const MODEL = process.env.OFFICE_MODEL || 'claude-opus-5-5';
 export const LIVE = Boolean(
@@ -135,13 +135,16 @@ function gmSystem() {
 
 // ---------------------------------------------------------------- employees
 
-async function runEmployee(emp, task, { context = '', effort = 'medium' } = {}) {
+async function runEmployee(emp, task, { context = '', effort = 'medium', onRead, onPast } = {}) {
   setStatus(emp.id, 'working', short(task, 80));
   emit('say', { id: emp.id, text: 'جاري العمل…' });
   try {
     let out;
     if (!LIVE) {
       await sleep(2500 + Math.random() * 3000);
+      // In demo mode, pretend to read one current file so the Sources list can be checked.
+      const files = (state.files ?? []).filter((f) => !f.superseded);
+      if (files.length && onRead) onRead(files[Math.floor(Math.random() * files.length)]);
       out = demoAnswer(emp, task);
     } else {
       const params = {
@@ -149,7 +152,10 @@ async function runEmployee(emp, task, { context = '', effort = 'medium' } = {}) 
         system: systemFor(emp),
         messages: [{ role: 'user', content: context ? `${task}\n\n---\nContext:\n${context}` : task }],
       };
-      const tools = knowledgeTools({ onRead: (f) => emit('say', { id: emp.id, text: `أقرأ ملف: ${f.name}` }) });
+      const tools = knowledgeTools({
+        onRead: (f) => (emit('say', { id: emp.id, text: `أقرأ ملف: ${f.name}` }), onRead?.(f)),
+        onPast,
+      });
       if (emp.webSearch) tools.push({ type: 'web_search_20260209', name: 'web_search', max_uses: 6 });
       const runner = api().beta.messages.toolRunner({ ...params, tools });
       out = textOf(await runner.runUntilDone());
@@ -403,7 +409,15 @@ export async function holdMeeting({ topic, participantIds }) {
 
 export async function runRequest(request) {
   const gm = state.employees.rami;
-  const task = { id: newId('task'), request, status: 'running', steps: [], at: new Date().toISOString() };
+  const task = { id: newId('task'), request, status: 'running', steps: [], sources: [], at: new Date().toISOString() };
+  // Which files and earlier work each agent actually read, for the "Sources" list.
+  const addSource = (kind, id, name, by) => {
+    let src = task.sources.find((x) => x.kind === kind && x.id === id);
+    if (!src) task.sources.push((src = { kind, id, name, by: [] }));
+    if (!src.by.includes(by)) src.by.push(by);
+  };
+  const pastName = (ref) => state.tasks.find((t) => t.id === ref)?.request ?? state.meetings.find((m) => m.id === ref)?.topic ?? ref;
+  const memoryCount = (state.memory ?? []).length;
   state.tasks.unshift(task);
   emit('task', { task });
   log('owner', request, { task: task.id });
@@ -417,7 +431,11 @@ export async function runRequest(request) {
     task.steps.push(step);
     emit('assign', { taskId: task.id, step, from: gm.id, to: emp.id });
     log('rami', `@${emp.name} ${brief}`, { task: task.id });
-    const result = await runEmployee(emp, brief, { context });
+    const result = await runEmployee(emp, brief, {
+      context,
+      onRead: (f) => addSource('file', f.id, f.name, emp.id),
+      onPast: (ref) => addSource('past', ref, pastName(ref), emp.id),
+    });
     step.status = 'done';
     step.result = result;
     emit('task', { task });
@@ -435,7 +453,10 @@ export async function runRequest(request) {
         system: gmSystem(),
         messages: [{ role: 'user', content: request }],
         tools: [
-          ...knowledgeTools({ onRead: (f) => emit('say', { id: gm.id, text: `أقرأ ملف: ${f.name}` }) }),
+          ...knowledgeTools({
+            onRead: (f) => (emit('say', { id: gm.id, text: `أقرأ ملف: ${f.name}` }), addSource('file', f.id, f.name, gm.id)),
+            onPast: (ref) => addSource('past', ref, pastName(ref), gm.id),
+          }),
           betaTool({
             name: 'assign_task',
             description: 'Assign a task to one employee and get their finished work back. Call several in one turn for independent tasks.',
@@ -486,7 +507,7 @@ export async function runRequest(request) {
     task.final = final;
     rememberTask(task).catch((err) => console.error('[memory] task note failed:', err));
     log('rami', final, { task: task.id, final: true });
-    addInbox({ from: 'rami', title: short(request, 70), body: final, taskId: task.id });
+    addInbox({ from: 'rami', title: short(request, 70), body: `${final}\n\n---\n${sourcesText(task.sources, memoryCount)}`, taskId: task.id });
     emit('say', { id: gm.id, text: 'التسليم جاهز في صندوق الوارد 📥' });
     return task;
   } catch (err) {
@@ -502,6 +523,22 @@ export async function runRequest(request) {
 }
 
 // ------------------------------------------------------------- knowledge
+
+/** The "Sources" section shown under every deliverable. */
+function sourcesText(sources, memoryCount) {
+  const who = (ids) => ids.map((id) => state.employees[id]?.nameAr ?? id).join('، ');
+  const files = sources.filter((x) => x.kind === 'file');
+  const past = sources.filter((x) => x.kind === 'past');
+  const lines = ['### 📚 المصادر'];
+  if (files.length) lines.push(...files.map((x) => {
+    const f = state.files?.find((y) => y.id === x.id);
+    return `- 📄 ${x.name}${f ? ` (نسخة ${f.at.slice(0, 10)})` : ''} — قرأه: ${who(x.by)}`;
+  }));
+  if (past.length) lines.push(...past.map((x) => `- 📋 شغل سابق: ${x.name} — رجع له: ${who(x.by)}`));
+  if (!files.length && !past.length) lines.push('- ما انقرأ أي ملف أو شغل سابق في هذي المهمة.');
+  lines.push(`- 🧠 ذاكرة الفريق: ${memoryCount} ملاحظة كانت قدام الفريق وقت التنفيذ.`);
+  return lines.join('\n');
+}
 
 /** Rami writes a short memory note after every finished task. */
 async function rememberTask(task) {
@@ -538,6 +575,118 @@ export async function summarizeFile(f) {
     console.error('[files] summary failed:', err);
     setSummary(f.id, f.name);
   }
+}
+
+// -------------------------------------------------------- daily briefing
+
+export const BRIEFING_TZ = process.env.BRIEFING_TZ || 'Asia/Riyadh';
+export const BRIEFING_HOUR = Math.min(23, Math.max(0, Number(process.env.BRIEFING_HOUR ?? 8)));
+const DASHBOARDS = Object.keys(CATEGORIES).filter((c) => c !== 'portal');
+let briefingRunning = false;
+
+function localNow() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', { timeZone: BRIEFING_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date())
+      .map((p) => [p.type, p.value]),
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+/**
+ * Nasser reads the latest version of every dashboard, compares it with the
+ * previous version, and sends the owner a daily briefing.
+ */
+export async function runBriefing({ trigger = 'manual' } = {}) {
+  const analyst = state.employees.nasser;
+  if (!analyst) throw new Error('وظّف ناصر (محلل البيانات والداشبوردات) أولاً من Hiring (HR).');
+  if (briefingRunning) throw new Error('ناصر يجهّز التقرير الحين.');
+  const slots = DASHBOARDS.map((c) => ({ c, ...dashboardVersions(c) }));
+  if (!slots.some((x) => x.latest)) throw new Error('ما فيه أي داشبورد مرفوع للحين. ارفعها من Files.');
+  briefingRunning = true;
+  const today = localNow().date;
+  setStatus(analyst.id, 'working', 'Daily dashboards briefing');
+  emit('say', { id: analyst.id, text: 'أراجع الداشبوردات…' });
+  try {
+    const ageDays = (f) => Math.floor((Date.now() - new Date(f.at).getTime()) / 86400000);
+    // Dashboards can be data files or screenshots; screenshots go in as images.
+    const blocks = [];
+    const addText = (t) => blocks.push({ type: 'text', text: t });
+    const addVersion = (title, f, max) => {
+      if (f.kind === 'image') {
+        addText(`${title} (screenshot below)`);
+        blocks.push(imageBlock(f));
+      } else addText(`${title}\n${fileText(f).slice(0, max)}`);
+    };
+    for (const { c, latest, previous } of slots) {
+      const label = CATEGORIES[c].label;
+      if (!latest) {
+        addText(`## ${label}\nNot uploaded yet.`);
+        continue;
+      }
+      addVersion(`## ${label}\nLatest: ${latest.name}, uploaded ${latest.at} (${ageDays(latest)} days ago)`, latest, 60000);
+      if (previous) addVersion(`### ${label} — previous version: ${previous.name}, uploaded ${previous.at}`, previous, 25000);
+      else addText(`(${label}: no previous version to compare with.)`);
+    }
+    let text;
+    if (!LIVE) {
+      await sleep(2500);
+      text = `## التقرير اليومي — ${today}\n\n${slots.map(({ c, latest, previous }) => `- **${CATEGORIES[c].labelAr}:** ${latest ? `${latest.name} (${ageDays(latest)} يوم)${previous ? ' — مقارنة مع النسخة السابقة' : ''}` : 'ما انرفع'}`).join('\n')}\n\n_(وضع التجربة)_`;
+    } else {
+      const lastNote = (state.memory ?? []).find((m) => m.kind === 'briefing');
+      const msg = await api().beta.messages.create({
+        ...base('medium'),
+        system: systemFor(analyst),
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Write today's dashboards briefing for the owner (${today}).
+
+For each dashboard: the headline numbers, what changed versus the previous version (with numbers and %), anything unusual (spikes, drops, budget over/under pace, missing data), and one action if needed. Then a short "today's priorities" list across all dashboards.
+Flag clearly any dashboard whose latest upload is more than 2 days old, and any dashboard that is missing.
+Only use numbers that appear in the data; if something cannot be computed, say so. Reply in Arabic, concise, with Markdown headings and small tables.${lastNote ? `\n\nYesterday's briefing note, for continuity:\n${lastNote.text}` : ''}
+
+The dashboards follow.`,
+            },
+            ...blocks,
+          ],
+        }],
+      });
+      text = textOf(msg);
+    }
+    const date = new Date().toLocaleDateString('ar-SA', { timeZone: BRIEFING_TZ });
+    addInbox({ from: analyst.id, title: `📊 التقرير اليومي للداشبوردات — ${date}`, body: text });
+    log(analyst.id, `خلصت التقرير اليومي للداشبوردات (${trigger === 'schedule' ? 'تلقائي' : 'بطلب'}). موجود في صندوق الوارد.`);
+    addMemory({ kind: 'briefing', title: `التقرير اليومي — ${today}`, text: short(text.replace(/\s+/g, ' '), 700), by: analyst.id });
+    state.lastBriefing = { date: today, at: new Date().toISOString(), trigger };
+    save();
+    emit('briefing', { lastBriefing: state.lastBriefing });
+    emit('say', { id: analyst.id, text: 'التقرير اليومي في صندوق الوارد 📥' });
+    return text;
+  } finally {
+    briefingRunning = false;
+    setStatus(analyst.id, 'idle');
+  }
+}
+
+/** Run the briefing once a day after BRIEFING_HOUR (local time). */
+export function startBriefingSchedule() {
+  const tick = () => {
+    const { date, hour } = localNow();
+    if (hour < BRIEFING_HOUR || state.lastBriefing?.date === date || !state.employees.nasser || briefingRunning) return;
+    if (!DASHBOARDS.some((c) => dashboardVersions(c).latest)) return;
+    runBriefing({ trigger: 'schedule' }).catch((err) => {
+      console.error('[briefing] failed:', err);
+      emit('error', { message: `تعذّر التقرير اليومي: ${friendlyError(err)}` });
+      // Don't retry every 5 minutes after a failure; try again tomorrow.
+      state.lastBriefing = { date, at: new Date().toISOString(), trigger: 'schedule', failed: true };
+      save();
+    });
+  };
+  setTimeout(tick, 15000);
+  setInterval(tick, 5 * 60 * 1000);
 }
 
 // -------------------------------------------------------- direct messages

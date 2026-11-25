@@ -93,6 +93,10 @@ function onEvent(ev) {
       S.files = ev.files;
       if (currentPanel === 'files') rerender();
       break;
+    case 'briefing':
+      S.briefing = { ...(S.briefing ?? {}), last: ev.lastBriefing };
+      if (currentPanel === 'files') rerender();
+      break;
     case 'memory':
       S.memory = ev.memory;
       if (currentPanel === 'memory') rerender();
@@ -145,9 +149,11 @@ const deptChip = (d) => `<span class="dept" style="background:${S.departments[d]
 const avatar = (id) => {
   const e = S.employees[id];
   if (id === 'owner') return '<span class="avatar" style="background:#f3b06b">👤</span>';
+  if (id === 'portal') return '<span class="avatar" style="background:#F5C518">📊</span>';
   return `<span class="avatar" style="background:${S.departments[e?.dept]?.color ?? '#ddd'}">${esc((e?.name ?? '?')[0])}</span>`;
 };
 function nameOf(id) {
+  if (id === 'portal') return 'بوابة التقرير';
   if (id === 'owner') return 'أنت';
   return S.employees[id]?.nameAr ?? id;
 }
@@ -240,21 +246,55 @@ const RENDER = {
 
   files: () => {
     const size = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`);
-    return `
-    <p>ارفع ملفات شغلك: تقارير، ميزانيات، خطط، عروض، صور حملات. كل الموظفين يقرونها ويرجعون لها في مهامهم.</p>
-    <p><small>المدعوم: PDF، Word (.docx)، Excel (.xlsx)، CSV، TXT، صور. حتى 25MB للملف.</small></p>
-    <input type="file" id="f-input" multiple style="display:none" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.webp,.gif,.html" />
-    <div class="row-input"><button class="btn accent" id="f-pick">⬆️ رفع ملفات</button></div>
-    <div id="f-progress"></div>
-    <h3>الملفات (${S.files.length})</h3>
-    ${S.files.map((f) => `
+    const date = (iso) => new Date(iso).toLocaleDateString('ar-SA');
+    const cats = S.categories ?? {};
+    const current = S.files.filter((f) => !f.superseded);
+    const old = S.files.filter((f) => f.superseded);
+    const row = (f) => `
       <div class="person">
         <span class="avatar" style="background:#eef0f3">${f.kind === 'image' ? '🖼' : '📄'}</span>
         <div class="info"><b dir="auto">${esc(f.name)}</b> ${f.builtin ? '<span class="dept" style="background:#e8a48a">دليل</span>' : ''}
-          <small>${size(f.size)} · ${timeOf(f.at)}${f.summary ? ` · ${esc(f.summary)}` : ' · ⏳ يتم تلخيصه…'}</small></div>
+          <small>${size(f.size)} · ${date(f.at)} ${timeOf(f.at)}${f.summary ? ` · ${esc(f.summary)}` : ' · ⏳ يتم تلخيصه…'}</small></div>
         <a class="btn secondary" href="/api/files/${f.id}/download">تنزيل</a>
         ${f.builtin ? '' : `<button class="btn secondary" data-del="${f.id}">حذف</button>`}
-      </div>`).join('') || '<p>ما فيه ملفات للحين.</p>'}`;
+      </div>`;
+    const dashCard = (c) => {
+      const f = current.find((x) => x.category === c);
+      const versions = S.files.filter((x) => x.category === c).length;
+      return `
+      <div class="item" style="cursor:default">
+        <div class="meta"><b style="color:var(--ink)">📈 ${esc(cats[c].labelAr)}</b>
+          <button class="btn accent" style="margin-inline-start:auto;padding:4px 10px" data-up="${c}">${f ? '⬆️ رفع نسخة جديدة' : '⬆️ رفع'}</button></div>
+        ${f ? `<div class="title" dir="auto">${esc(f.name)}</div>
+          ${Date.now() - new Date(f.at).getTime() > 2 * 86400000 ? '<span class="status working">⚠️ قديم: مر عليه أكثر من يومين</span><br>' : ''}
+          <small style="color:var(--muted)">آخر تحديث: ${date(f.at)} ${timeOf(f.at)} · ${versions} ${versions === 1 ? 'نسخة' : 'نسخ'}${f.summary ? ` · ${esc(f.summary)}` : ' · ⏳ يتم تلخيصه…'}</small>
+          <div class="row-input"><a class="btn secondary" href="/api/files/${f.id}/download">تنزيل</a></div>`
+        : '<small style="color:var(--muted)">ما انرفع للحين. صدّر الداشبورد كـ Excel أو CSV وارفعه هنا.</small>'}
+      </div>`;
+    };
+    const portal = current.filter((f) => f.category === 'portal');
+    const general = current.filter((f) => !f.category);
+    return `
+    <input type="file" id="f-input" multiple style="display:none" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.json,.png,.jpg,.jpeg,.webp,.gif,.html" />
+    <h3>الداشبوردات</h3>
+    <p><small>كل داشبورد له خانة ثابتة. ارفع النسخة الجديدة كل ما تتحدث، والفريق يشتغل دائماً على آخر نسخة. النسخ القديمة تبقى محفوظة تحت.</small></p>
+    ${['leads', 'emails', 'budget', 'cameras'].filter((c) => cats[c]).map(dashCard).join('')}
+    <div class="item" style="cursor:default">
+      <div class="meta"><b style="color:var(--ink)">🧑‍💻 ناصر — محلل البيانات والداشبوردات</b>
+        <button class="btn" style="margin-inline-start:auto;padding:4px 10px" id="brief-now" ${S.employees.nasser ? '' : 'disabled'}>📊 اطلب التقرير الحين</button></div>
+      <small style="color:var(--muted)">${S.employees.nasser
+        ? `يقرأ كل الداشبوردات يومياً الساعة ${S.briefing?.hour ?? 8}:00 (${esc(S.briefing?.tz ?? '')}) ويقارنها بالنسخة السابقة، ويرسل لك التقرير في Inbox.${S.briefing?.last ? ` آخر تقرير: ${date(S.briefing.last.at)} ${timeOf(S.briefing.last.at)}${S.briefing.last.failed ? ' (فشل)' : ''}.` : ''}`
+        : 'ناصر للحين مو موظف. وظّفه من Hiring (HR) عشان يتابع الداشبوردات يومياً.'}</small>
+    </div>
+    <h3>بوابة التقرير الشهري (${portal.length})</h3>
+    <p><small>رابط البوابة للفريق: <a href="/portal/" target="_blank" dir="ltr">${location.origin}/portal/</a>. أي قسم ينرسل منها يوصل هنا تلقائياً.</small></p>
+    ${portal.map(row).join('') || '<p><small>ما وصل أي قسم من البوابة للحين.</small></p>'}
+    <h3>ملفات عامة (${general.length})</h3>
+    <p><small>تقارير، خطط، عروض، صور حملات. المدعوم: PDF، Word، Excel، CSV، TXT، صور (حتى 25MB).</small></p>
+    <div class="row-input"><button class="btn accent" data-up="">⬆️ رفع ملفات</button></div>
+    <div id="f-progress"></div>
+    ${general.map(row).join('') || '<p>ما فيه ملفات للحين.</p>'}
+    ${old.length ? `<details style="margin-top:12px"><summary>نسخ سابقة (${old.length}) — الفريق ما يستخدمها</summary>${old.map(row).join('')}</details>` : ''}`;
   },
 
   memory: () => `
@@ -265,7 +305,7 @@ const RENDER = {
     <h3>الذاكرة (${S.memory.length})</h3>
     ${S.memory.map((m) => `
       <div class="item">
-        <div class="meta">${{ task: '📋 مهمة', meeting: '📅 اجتماع', note: '📌 ملاحظة' }[m.kind] ?? m.kind} · ${timeOf(m.at)} ${new Date(m.at).toLocaleDateString('ar-SA')}
+        <div class="meta">${{ task: '📋 مهمة', meeting: '📅 اجتماع', note: '📌 ملاحظة', briefing: '📊 تقرير يومي' }[m.kind] ?? m.kind} · ${timeOf(m.at)} ${new Date(m.at).toLocaleDateString('ar-SA')}
           <button class="btn secondary" style="margin-inline-start:auto;padding:2px 8px" data-mdel="${m.id}">حذف</button></div>
         <div class="title">${esc(m.title)}</div>
         <div class="md">${md(m.text)}</div>
@@ -304,6 +344,10 @@ const RENDER = {
     <textarea class="field" id="c-about" style="margin-top:8px">${esc(S.company.about)}</textarea>
     <p><small>هذا الوصف يوصل لكل الإيجنتات، فكل ما كان أدق (المنتجات، السوق، الجمهور، الميزانيات) كانت النتائج أفضل.</small></p>
     <div class="row-input"><button class="btn" id="c-save">حفظ</button></div>
+    <h3>بوابة التقرير الشهري</h3>
+    <p><small>أرسل هذا الرابط لفريق التسويق: <a href="/portal/" target="_blank" dir="ltr">${location.origin}/portal/</a>. ما يحتاجون كلمة مرور المكتب. ${S.portalCodeSet ? 'الإرسال محمي برمز البوابة (PORTAL_CODE).' : 'لحماية الإرسال، أضف متغير PORTAL_CODE في Railway وأعطِ الرمز للفريق.'}</small></p>
+    <h3>الرفع التلقائي</h3>
+    <p><small>${S.ingestEnabled ? 'مفعّل: أي أداة أتمتة (مثل Power Automate) تقدر ترفع الداشبوردات على <code dir="ltr">/api/ingest/file?category=leads|emails|budget</code> بالتوكن INGEST_TOKEN.' : 'غير مفعّل. لتفعيله أضف متغير INGEST_TOKEN في Railway.'}</small></p>
     <h3>المكتب</h3>
     <p><small>الوضع الحالي: ${S.live ? `متصل بـ Claude API (${esc(S.model)})` : 'وضع التجربة — شغّل السيرفر مع <code>ANTHROPIC_API_KEY</code>.'}</small></p>
     ${S.keyInfo?.set ? `<p><small>المفتاح اللي وصل للسيرفر: <code dir="ltr">${esc(S.keyInfo.prefix)}…${esc(S.keyInfo.suffix)}</code> (${S.keyInfo.length} حرف)${S.keyInfo.cleaned ? ' — تم حذف حروف مخفية منه' : ''}${S.keyInfo.looksValid ? '' : ' — <b style="color:#e5484d">شكله مو مفتاح Anthropic صحيح</b>'}</small></p>
@@ -388,8 +432,18 @@ const BIND = {
     $('#h-custom').onkeydown = (e) => e.key === 'Enter' && custom();
   },
   files: (b) => {
+    const brief = $('#brief-now');
+    if (brief) brief.onclick = () => {
+      brief.disabled = true;
+      api('/api/briefing/run', {}).then(() => toast('ناصر بدأ يراجع الداشبوردات…')).catch((e) => toast(e.message, null, true));
+    };
     const input = $('#f-input');
-    $('#f-pick').onclick = () => input.click();
+    let category = '';
+    b.querySelectorAll('[data-up]').forEach((el) => (el.onclick = () => {
+      category = el.dataset.up;
+      input.multiple = !category;
+      input.click();
+    }));
     input.onchange = async () => {
       const prog = $('#f-progress');
       for (const file of input.files) {
@@ -397,13 +451,17 @@ const BIND = {
         line.textContent = `⏳ يرفع: ${file.name}`;
         prog.appendChild(line);
         try {
-          const res = await fetch('/api/files', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+          const headers = { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) };
+          if (category) headers['X-File-Category'] = category;
+          const res = await fetch('/api/files', { method: 'POST', headers, body: file });
           const data = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(data.error || res.statusText);
           line.textContent = `✅ ${file.name}`;
+          toast(`✅ انرفع: ${file.name}`);
         } catch (e) {
           line.textContent = `❌ ${file.name}: ${e.message}`;
           line.style.color = '#e5484d';
+          toast(`${file.name}: ${e.message}`, null, true);
         }
       }
       input.value = '';

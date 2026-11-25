@@ -10,6 +10,17 @@ const FILES_DIR = path.join(DATA_DIR, 'files');
 const BUILTIN_DIR = path.join(here, '..', 'knowledge');
 
 export const MAX_UPLOAD = 25 * 1024 * 1024;
+
+// Fixed slots for files the owner refreshes regularly. Uploading a new file
+// into a slot makes it the current version; older versions stay downloadable
+// but agents only see the latest.
+export const CATEGORIES = {
+  leads: { label: 'Leads dashboard', labelAr: 'داشبورد الليدز' },
+  emails: { label: 'Emails dashboard', labelAr: 'داشبورد الإيميلات' },
+  budget: { label: 'Budget dashboard', labelAr: 'داشبورد الميزانية' },
+  cameras: { label: 'Cameras dashboard', labelAr: 'داشبورد الكاميرات' },
+  portal: { label: 'Monthly report portal', labelAr: 'بوابة التقرير الشهري' },
+};
 const MAX_TOOL_TEXT = 60000;
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 const TEXT_EXT = new Set(['.txt', '.md', '.csv', '.json', '.tsv', '.log', '.xml']);
@@ -28,11 +39,17 @@ async function extractText(buf, name) {
   const e = ext(name);
   if (TEXT_EXT.has(e)) return buf.toString('utf8');
   if (e === '.html' || e === '.htm') {
-    return buf
-      .toString('utf8')
+    // Dashboards saved as HTML usually keep their numbers inside <script>
+    // (arrays/JSON for the charts), so keep inline script text as data.
+    const html = buf.toString('utf8');
+    const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1].trim()).filter(Boolean);
+    const visible = html
       .replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ')
       .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ');
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return scripts.length ? `${visible}\n\n--- Embedded page data (scripts) ---\n${scripts.join('\n\n').slice(0, 200000)}` : visible;
   }
   if (e === '.pdf') {
     const { extractText: pdfText, getDocumentProxy } = await import('unpdf');
@@ -70,9 +87,10 @@ async function extractText(buf, name) {
 // ------------------------------------------------------------------ files
 
 /** Save an uploaded file, extract its text, and register it. */
-export async function addFile(buf, name, { by = 'owner', builtin = false } = {}) {
+export async function addFile(buf, name, { by = 'owner', builtin = false, category = null, key = null } = {}) {
   ensureDirs();
   if (buf.length > MAX_UPLOAD) throw new Error('حجم الملف أكبر من 25MB');
+  if (category && !CATEGORIES[category]) throw new Error(`Unknown category ${category}`);
   const text = await extractText(buf, name);
   const f = {
     id: newId('f'),
@@ -82,12 +100,17 @@ export async function addFile(buf, name, { by = 'owner', builtin = false } = {})
     chars: text?.length ?? 0,
     by,
     builtin,
+    category,
+    key: key ?? (category && category !== 'portal' ? category : null),
+    superseded: false,
     summary: '',
     at: new Date().toISOString(),
   };
   fs.writeFileSync(blobPath(f), buf);
   if (text != null) fs.writeFileSync(textPath(f), text);
   state.files ??= [];
+  // A new version replaces the previous one in the same slot.
+  if (f.key) for (const old of state.files) if (old.key === f.key && !old.superseded) old.superseded = true;
   state.files.unshift(f);
   save();
   emit('files', { files: state.files });
@@ -123,6 +146,14 @@ export function fileText(f) {
   } catch {
     return '';
   }
+}
+
+/** Latest and previous version of a dashboard slot (previous may be null). */
+export function dashboardVersions(category) {
+  const all = (state.files ?? []).filter((f) => f.category === category);
+  const latest = all.find((f) => !f.superseded) ?? null;
+  const previous = latest ? all.find((f) => f.superseded && f.at < latest.at) ?? null : null;
+  return { latest, previous };
 }
 
 export function imageBlock(f) {
@@ -167,14 +198,31 @@ export function removeMemory(id) {
 
 /** The knowledge section added to every agent's system prompt. */
 export function knowledgeBlock() {
-  const files = state.files ?? [];
+  const current = (state.files ?? []).filter((f) => !f.superseded);
   const memory = state.memory ?? [];
+  const line = (f) => `- ${f.id}: ${f.name} (updated ${f.at.slice(0, 10)})${f.summary ? ` — ${f.summary}` : ''}`;
   const parts = [];
+  parts.push('## Dashboards (latest version of each)');
+  const dash = Object.entries(CATEGORIES)
+    .filter(([c]) => c !== 'portal')
+    .map(([c, meta]) => {
+      const f = current.find((x) => x.category === c);
+      return f ? `- ${meta.label}: ${line(f).slice(2)}` : `- ${meta.label}: not uploaded yet`;
+    });
+  parts.push(`These are the owner's live numbers. For leads, emails or budget questions, read the matching file first and say which date it is from.\n${dash.join('\n')}`);
+  parts.push('');
+  const portal = current.filter((f) => f.category === 'portal');
+  if (portal.length) {
+    parts.push('## Monthly report portal submissions');
+    parts.push(portal.map(line).join('\n'));
+    parts.push('');
+  }
+  const other = current.filter((f) => !f.category || !CATEGORIES[f.category]);
   parts.push('## Company files');
   parts.push(
-    files.length
-      ? `Read a file with read_company_file before relying on it. Files:\n${files.map((f) => `- ${f.id}: ${f.name}${f.summary ? ` — ${f.summary}` : ''}`).join('\n')}`
-      : 'No company files uploaded yet.',
+    other.length
+      ? `Read a file with read_company_file before relying on it. Files:\n${other.map(line).join('\n')}`
+      : 'No other company files uploaded yet.',
   );
   parts.push('');
   parts.push('## Team memory (newest first)');
@@ -190,7 +238,7 @@ export function knowledgeBlock() {
 }
 
 /** Tools every agent gets for reading files and earlier work. */
-export function knowledgeTools({ onRead } = {}) {
+export function knowledgeTools({ onRead, onPast } = {}) {
   return [
     betaTool({
       name: 'read_company_file',
@@ -224,6 +272,7 @@ export function knowledgeTools({ onRead } = {}) {
         required: ['ref'],
       },
       run: ({ ref }) => {
+        onPast?.(ref);
         const task = state.tasks.find((t) => t.id === ref);
         if (task) return `Request: ${task.request}\n\n${task.final ?? task.error ?? '(no final deliverable)'}`;
         const meeting = state.meetings.find((m) => m.id === ref);
